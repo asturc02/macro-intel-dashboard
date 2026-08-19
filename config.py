@@ -96,6 +96,8 @@ class Country:
             a price *index* (see ``cpi_is_index``).
         unemployment: FRED series ID for the unemployment rate.
         y10: FRED series ID for the 10-year government bond yield.
+        gdp_qoq: FRED series ID for real GDP QoQ growth (OECD ``NAEXKP01..Q657S``,
+            annualized for display). ``None`` where no current free series exists.
         cpi_is_index: When ``True``, ``cpi_yoy`` points at a price index and YoY
             must be computed from it (used for US/EA, whose live series are
             indices rather than pre-computed growth rates).
@@ -113,6 +115,7 @@ class Country:
         cpi_yoy: str | None,
         unemployment: str | None,
         y10: str | None,
+        gdp_qoq: str | None = None,
         cpi_is_index: bool = False,
         is_emerging: bool = False,
     ) -> None:
@@ -125,6 +128,7 @@ class Country:
         self.cpi_yoy = cpi_yoy
         self.unemployment = unemployment
         self.y10 = y10
+        self.gdp_qoq = gdp_qoq
         self.cpi_is_index = cpi_is_index
         self.is_emerging = is_emerging
 
@@ -145,6 +149,7 @@ COUNTRIES: tuple[Country, ...] = (
         cpi_yoy="CPIAUCSL", cpi_is_index=True,   # index -> YoY computed (live)
         unemployment="UNRATE",
         y10="IRLTLT01USM156N",
+        gdp_qoq="NAEXKP01USQ657S",
     ),
     Country(
         code="EA", name="Euro Area", currency="EUR",
@@ -153,6 +158,7 @@ COUNTRIES: tuple[Country, ...] = (
         cpi_yoy="CP0000EZ19M086NEST", cpi_is_index=True,  # Eurostat HICP index
         unemployment="LRHUTTTTDEM156S",   # Germany proxy (live)
         y10="IRLTLT01DEM156N",            # Bund 10Y (EUR benchmark)
+        gdp_qoq="NAEXKP01DEQ657S",
     ),
     Country(
         code="JP", name="Japan", currency="JPY",
@@ -161,6 +167,7 @@ COUNTRIES: tuple[Country, ...] = (
         cpi_yoy="FPCPITOTLZGJPN",         # World Bank annual CPI YoY (live-ish)
         unemployment="LRHUTTTTJPM156S",
         y10="IRLTLT01JPM156N",
+        gdp_qoq="NAEXKP01JPQ657S",
     ),
     Country(
         code="GB", name="United Kingdom", currency="GBP",
@@ -169,6 +176,7 @@ COUNTRIES: tuple[Country, ...] = (
         cpi_yoy="CPALTT01GBM659N",
         unemployment="LRHUTTTTGBM156S",
         y10="IRLTLT01GBM156N",
+        gdp_qoq="NAEXKP01GBQ657S",
     ),
     Country(
         code="AU", name="Australia", currency="AUD",
@@ -177,6 +185,7 @@ COUNTRIES: tuple[Country, ...] = (
         cpi_yoy="CPALTT01AUQ659N",        # quarterly
         unemployment="LRHUTTTTAUM156S",
         y10="IRLTLT01AUM156N",
+        gdp_qoq="NAEXKP01AUQ657S",
     ),
     Country(
         code="NZ", name="New Zealand", currency="NZD",
@@ -185,6 +194,7 @@ COUNTRIES: tuple[Country, ...] = (
         cpi_yoy="FPCPITOTLZGNZL",         # World Bank annual (OECD quarterly froze 2023)
         unemployment="LRHUTTTTNZQ156S",   # quarterly
         y10="IRLTLT01NZM156N",
+        gdp_qoq="NAEXKP01NZQ657S",
     ),
     Country(
         code="CA", name="Canada", currency="CAD",
@@ -193,6 +203,7 @@ COUNTRIES: tuple[Country, ...] = (
         cpi_yoy="CPALTT01CAM659N",
         unemployment="LRHUTTTTCAM156S",
         y10="IRLTLT01CAM156N",
+        gdp_qoq="NAEXKP01CAQ657S",
     ),
     Country(
         code="NO", name="Norway", currency="NOK",
@@ -201,6 +212,7 @@ COUNTRIES: tuple[Country, ...] = (
         cpi_yoy="CPALTT01NOM659N",
         unemployment="LRHUTTTTNOM156S",
         y10="IRLTLT01NOM156N",
+        gdp_qoq="NAEXKP01NOQ657S",
     ),
     # --- Emerging markets (free-data gaps expected; shown honestly as n/a) ---
     Country(
@@ -210,6 +222,7 @@ COUNTRIES: tuple[Country, ...] = (
         cpi_yoy="FPCPITOTLZGBRA",         # World Bank annual CPI YoY
         unemployment=None,                # no live free series; n/a
         y10=None,                         # no clean free curve; n/a
+        gdp_qoq="NAEXKP01BRQ657S",
         is_emerging=True,
     ),
     Country(
@@ -235,6 +248,28 @@ METRIC_LABELS: dict[str, str] = {
     "y10": "10Y Gov. Bond Yield (%)",
 }
 WINDOW_YEARS: dict[str, int | None] = {"1Y": 1, "2Y": 2, "5Y": 5, "Max": None}
+
+# --- US leading / expectation indicators ------------------------------------
+# Directional, high-frequency US series watched ahead of the big releases. All
+# are current and free on FRED. Each row: (label, series_id, transform, note).
+# Transforms: "level_k" latest level in thousands; "mom_diff_k" month-over-month
+# change (net additions) in thousands; "yoy" year-over-year % from an index.
+LEADING_EMPLOYMENT: tuple[tuple[str, str, str, str], ...] = (
+    ("Initial jobless claims", "ICSA", "level_k",
+     "Weekly · first-time filers. Rising = labor market softening."),
+    ("Continued claims", "CCSA", "level_k",
+     "Weekly · still collecting benefits. Trend > level."),
+    ("Net payrolls (MoM)", "PAYEMS", "mom_diff_k",
+     "Monthly · change in nonfarm payrolls (jobs added)."),
+)
+LEADING_INFLATION: tuple[tuple[str, str, str, str], ...] = (
+    ("Core PCE", "PCEPILFE", "yoy",
+     "The Fed's preferred inflation gauge — prioritized over CPI."),
+    ("Headline PCE", "PCEPI", "yoy", "Total PCE inflation, YoY."),
+    ("PPI (final demand)", "PPIFIS", "yoy",
+     "Producer/pipeline prices — often lead consumer inflation."),
+    ("CPI (headline)", "CPIAUCSL", "yoy", "Shown for comparison with PCE."),
+)
 
 # --- Theme (GetVision-aligned iOS dark system) ------------------------------
 # Deep-navy layered surfaces, a single teal brand accent used sparingly, and

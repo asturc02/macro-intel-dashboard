@@ -22,7 +22,7 @@ import fx
 import metrics
 import utils
 
-BUILD_MARKER = "build: macro-intel v5 (top-menu + footer)"
+BUILD_MARKER = "build: macro-intel v6 (GDP + leading indicators)"
 
 st.set_page_config(
     page_title="Macro Intelligence Dashboard",
@@ -225,10 +225,14 @@ def warm_cache(api_key: str) -> None:
     series_ids: set[str] = set(config.US_CURVE.values())
     series_ids.update({config.SPREAD_10Y_2Y, config.SPREAD_10Y_3M})
     for c in config.COUNTRIES:
-        for attr in ("policy_rate", "cpi_yoy", "unemployment", "y10"):
+        for attr in ("policy_rate", "cpi_yoy", "unemployment", "y10", "gdp_qoq"):
             sid = getattr(c, attr)
             if sid:
                 series_ids.add(sid)
+    for label, sid, transform, note in (
+        config.LEADING_EMPLOYMENT + config.LEADING_INFLATION
+    ):
+        series_ids.add(sid)
     currencies = [c.currency for c in config.COUNTRIES if c.currency != "USD"]
 
     with ThreadPoolExecutor(max_workers=10) as pool:
@@ -266,6 +270,11 @@ def build_snapshot(api_key: str) -> pd.DataFrame:
         y10 = fred.latest(get_series(c.y10, api_key, None))[1]
         rate_chg = fred.change_over(get_series(c.policy_rate, api_key, None), 6)
 
+        # GDP: latest quarter's real QoQ growth, annualized for a comparable
+        # baseline (matches the standard "annualized rate" reporting).
+        gdp_q = fred.latest(get_series(c.gdp_qoq, api_key, None))[1] if c.gdp_qoq else None
+        gdp = round(((1 + gdp_q / 100) ** 4 - 1) * 100, 2) if gdp_q is not None else None
+
         carry = metrics.carry_vs_base(policy, us_policy)
         vol = get_fx_vol(c.currency) if c.currency != "USD" else None
         # Stance needs a policy-rate trajectory; without it (some EM), inflation
@@ -288,6 +297,7 @@ def build_snapshot(api_key: str) -> pd.DataFrame:
                 "CPI YoY %": cpi,
                 "Real Rate %": metrics.real_rate(policy, cpi),
                 "10Y %": y10,
+                "GDP %": gdp,
                 "Carry vs USD": carry,
                 "10Y vs US": metrics.yield_diff_vs_base(y10, us_y10),
                 "Unemp %": unemp,
@@ -442,9 +452,10 @@ def module_carry(snap: pd.DataFrame) -> None:
     )
     st.caption(
         "ℹ️ Policy rate is the actual target for US (Fed) & EA (ECB); for other "
-        "economies it's a money-market proxy (3m interbank / overnight). CPI is "
-        "current for US/EA/JP; some others lag ~1yr on free data. See **Data "
-        "Health** for the exact vintage of every cell."
+        "economies it's a money-market proxy (3m interbank / overnight). GDP is "
+        "the latest quarter's real growth, annualized. CPI is current for US/EA/JP; "
+        "some others lag ~1yr on free data. See **Data Health** for the exact "
+        "vintage of every cell."
     )
 
     hawks = (snap["Stance"].str.contains("Hawk")).sum()
@@ -460,19 +471,24 @@ def module_carry(snap: pd.DataFrame) -> None:
 
     display_cols = [
         "Economy", "CCY", "Stance", "Policy %", "CPI YoY %", "Real Rate %",
-        "10Y %", "Carry vs USD", "10Y vs US", "Unemp %", "FX Vol %", "Carry/Vol",
+        "GDP %", "10Y %", "Carry vs USD", "10Y vs US", "Unemp %", "FX Vol %",
+        "Carry/Vol",
     ]
     num_cols = [
-        "Policy %", "CPI YoY %", "Real Rate %", "10Y %", "Carry vs USD",
+        "Policy %", "CPI YoY %", "Real Rate %", "GDP %", "10Y %", "Carry vs USD",
         "10Y vs US", "Unemp %", "FX Vol %", "Carry/Vol",
     ]
-    col_cfg = {
-        c: st.column_config.NumberColumn(c, format="%.2f") for c in num_cols
-    }
+    col_cfg = {c: st.column_config.NumberColumn(c, format="%.2f") for c in num_cols}
+    col_cfg["Economy"] = st.column_config.TextColumn("Economy", width="medium")
+    col_cfg["GDP %"] = st.column_config.NumberColumn(
+        "GDP %", format="%.2f", help="Latest quarter real GDP growth, annualized"
+    )
+    # Expand the table so every economy is visible without scrolling.
     st.dataframe(
         snap[display_cols],
         use_container_width=True,
         hide_index=True,
+        height=(len(snap) + 1) * 35 + 3,
         column_config=col_cfg,
     )
 
@@ -705,6 +721,115 @@ def module_timeseries(api_key: str) -> None:
     st.plotly_chart(_style_fig(fig, 460), use_container_width=True)
 
 
+def _leading_row(
+    sid: str, transform: str, api_key: str
+) -> tuple[float | None, float | None, pd.Series]:
+    """Compute the latest value, change vs prior, and display series for a series.
+
+    Args:
+        sid: FRED series ID.
+        transform: ``level_k`` (level ÷ 1000), ``mom_diff_k`` (period change), or
+            ``yoy`` (12-period % change from an index).
+        api_key: Resolved FRED key.
+
+    Returns:
+        ``(latest, delta_vs_prior, display_series)``; latest/delta are ``None``
+        when unavailable.
+    """
+    raw = get_series(sid, api_key, None)
+    if raw.empty:
+        return None, None, raw
+    if transform == "level_k":
+        disp = raw / 1000.0
+    elif transform == "mom_diff_k":
+        disp = raw.diff().dropna()
+    elif transform == "yoy":
+        disp = (raw.pct_change(12) * 100).dropna()
+    else:
+        disp = raw
+    if disp.empty:
+        return None, None, disp
+    latest = float(disp.iloc[-1])
+    delta = float(disp.iloc[-1] - disp.iloc[-2]) if len(disp) > 1 else None
+    return latest, delta, disp
+
+
+def module_leading(api_key: str) -> None:
+    """Render the US leading / expectation indicators module.
+
+    Args:
+        api_key: Resolved FRED key.
+    """
+    st.subheader("Leading Indicators — United States")
+    st.caption(
+        "High-frequency, directional US series watched ahead of the major "
+        "releases: employment tends to turn first, and **core PCE** is the Fed's "
+        "preferred inflation gauge (prioritized over CPI)."
+    )
+    window_years = window_control("leading_window", default="2Y")
+    start = utils.window_start(window_years)
+
+    st.markdown("###### Employment — leads the cycle")
+    for col, (label, sid, transform, note) in zip(
+        st.columns(len(config.LEADING_EMPLOYMENT)), config.LEADING_EMPLOYMENT
+    ):
+        latest, delta, disp = _leading_row(sid, transform, api_key)
+        with col:
+            if latest is None:
+                st.metric(label, "n/a")
+                st.caption(note)
+                continue
+            # Rising jobless claims = softening labor market -> inverse (red up).
+            invert = transform == "level_k"
+            st.metric(
+                label, f"{latest:,.0f}K",
+                f"{delta:+,.0f}K" if delta is not None else None,
+                delta_color="inverse" if invert else "normal",
+            )
+            d = disp[disp.index >= pd.Timestamp(start)] if start else disp
+            fig = go.Figure(go.Scatter(
+                x=d.index, y=d.values, mode="lines",
+                line=dict(color=config.COLOR_ACCENT, width=2),
+            ))
+            fig.update_layout(margin=dict(l=0, r=0, t=6, b=0), showlegend=False)
+            st.plotly_chart(_style_fig(fig, 140), use_container_width=True)
+            st.caption(note)
+
+    st.markdown("###### Inflation — Fed watches core PCE over CPI")
+    yoy_series: dict[str, pd.Series] = {}
+    for col, (label, sid, transform, note) in zip(
+        st.columns(len(config.LEADING_INFLATION)), config.LEADING_INFLATION
+    ):
+        latest, delta, disp = _leading_row(sid, transform, api_key)
+        yoy_series[label] = disp
+        with col:
+            if latest is None:
+                st.metric(label, "n/a")
+                st.caption(note)
+                continue
+            st.metric(
+                label, f"{latest:.2f}%",
+                f"{delta:+.2f} pp" if delta is not None else None,
+                delta_color="off",
+            )
+            st.caption(note)
+
+    fig = go.Figure()
+    for i, (label, s) in enumerate(yoy_series.items()):
+        if s is None or s.empty:
+            continue
+        d = s[s.index >= pd.Timestamp(start)] if start else s
+        fig.add_trace(go.Scatter(
+            x=d.index, y=d.values, name=label,
+            line=dict(color=config.PALETTE[i % len(config.PALETTE)]),
+        ))
+    fig.add_hline(y=2.0, line_dash="dot", line_color=config.COLOR_NEUTRAL,
+                  annotation_text="2% target")
+    fig.update_layout(title="US inflation gauges (YoY %)",
+                      xaxis_title="Date", yaxis_title="YoY %")
+    st.plotly_chart(_style_fig(fig, 380), use_container_width=True)
+
+
 def module_health(api_key: str, snap: pd.DataFrame) -> None:
     """Render the Data Health panel: which FRED series resolved, latest values.
 
@@ -726,6 +851,7 @@ def module_health(api_key: str, snap: pd.DataFrame) -> None:
         ("CPI YoY", "cpi_yoy"),
         ("Unemployment", "unemployment"),
         ("10Y yield", "y10"),
+        ("Real GDP QoQ", "gdp_qoq"),
     ]
     for c in config.COUNTRIES:
         for label, attr in fields:
@@ -797,8 +923,9 @@ def main() -> None:
         warm_cache(api_key)          # parallel fan-out; fills the shared cache
         snap = build_snapshot(api_key)
 
-    tab1, tab2, tab3, tab4 = st.tabs(
-        ["Carry & Divergence", "Yield Curves", "Time-Series", "Data Health"]
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+        ["Carry & Divergence", "Yield Curves", "Time-Series",
+         "Leading Indicators", "Data Health"]
     )
     with tab1:
         module_carry(snap)
@@ -807,6 +934,8 @@ def main() -> None:
     with tab3:
         module_timeseries(api_key)
     with tab4:
+        module_leading(api_key)
+    with tab5:
         module_health(api_key, snap)
 
     render_footer()
