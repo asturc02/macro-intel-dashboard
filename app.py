@@ -22,7 +22,7 @@ import fx
 import metrics
 import utils
 
-BUILD_MARKER = "build: macro-intel v6 (GDP + leading indicators)"
+BUILD_MARKER = "build: macro-intel v7 (chart title/legend/label fixes)"
 
 st.set_page_config(
     page_title="Macro Intelligence Dashboard",
@@ -320,21 +320,31 @@ def _style_fig(fig: go.Figure, height: int = 420) -> go.Figure:
         The same figure, restyled in place.
     """
     sf_font = '-apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif'
+    # Only reserve top space / render a title when one was actually set — this
+    # avoids Plotly printing a literal "undefined" on title-less mini charts.
+    has_title = bool(fig.layout.title.text)
     fig.update_layout(
         template="plotly_dark",
         paper_bgcolor="rgba(0,0,0,0)",   # inherit the card surface behind it
         plot_bgcolor="rgba(0,0,0,0)",
         height=height,
-        margin=dict(l=10, r=10, t=44, b=10),
+        # Extra top room so a top-right legend never collides with the title;
+        # a little right room so outside bar labels aren't clipped.
+        margin=dict(l=10, r=26, t=58 if has_title else 16, b=10),
         font=dict(family=sf_font, color=config.COLOR_TEXT_SEC, size=13),
-        title=dict(font=dict(family=sf_font, color=config.COLOR_TEXT, size=15)),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0,
+        # Title top-LEFT, legend top-RIGHT -> they share the top band without overlap.
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=1, xanchor="right",
                     font=dict(color=config.COLOR_TEXT_SEC)),
         hovermode="x unified",
         hoverlabel=dict(bgcolor=config.COLOR_ELEVATED, font_size=12,
                         font_family=sf_font, bordercolor="rgba(0,0,0,0)"),
         colorway=list(config.PALETTE),
     )
+    if has_title:
+        fig.update_layout(title=dict(
+            text=fig.layout.title.text, x=0, xanchor="left", y=0.97, yanchor="top",
+            font=dict(family=sf_font, color=config.COLOR_TEXT, size=15),
+        ))
     fig.update_xaxes(gridcolor=config.COLOR_GRID, zeroline=False,
                      linecolor=config.COLOR_GRID)
     fig.update_yaxes(gridcolor=config.COLOR_GRID, zeroline=False,
@@ -514,6 +524,10 @@ def module_carry(snap: pd.DataFrame) -> None:
                 title="Real policy rate by currency",
                 xaxis_title="Real rate (pp)", yaxis_title="Currency",
             )
+            # Let outside labels render past the bar ends without clipping.
+            fig.update_traces(cliponaxis=False)
+            vmin, vmax = rr["Real Rate %"].min(), rr["Real Rate %"].max()
+            fig.update_xaxes(range=[vmin - 0.7, vmax + 0.7])
             st.plotly_chart(_style_fig(fig, 380), use_container_width=True)
 
     with right:
@@ -618,6 +632,9 @@ def module_curves(api_key: str) -> None:
             ))
             fig.update_layout(title="Cross-country 10Y yield (latest)",
                               xaxis_title="10Y yield (%)", yaxis_title="Currency")
+            # Headroom + no clipping so the value labels are fully visible.
+            fig.update_traces(cliponaxis=False)
+            fig.update_xaxes(range=[0, max(vals) * 1.18])
             st.plotly_chart(_style_fig(fig, 340), use_container_width=True)
 
     # --- Overlay selected 10Y histories -----------------------------------
