@@ -255,3 +255,20 @@ PALETTE: tuple[str, ...] = (
     "#1F8579", "#10B981", "#8B5CF6", "#F59E0B", "#EF4444",
     "#22D3EE", "#60A5FA", "#F472B6", "#4ADE80", "#FBBF24",
 )
+
+# User-selectable palettes for comparison charts (color-customization dropdown).
+PALETTES: dict[str, tuple[str, ...]] = {
+    "Teal & Jewel": PALETTE,
+    "Colorblind-safe": (
+        "#0072B2", "#E69F00", "#009E73", "#CC79A7", "#56B4E9",
+        "#D55E00", "#F0E442", "#999999", "#000000", "#8DD3C7",
+    ),
+    "Vivid": (
+        "#EF4444", "#F59E0B", "#10B981", "#3B82F6", "#8B5CF6",
+        "#EC4899", "#22D3EE", "#84CC16", "#F97316", "#A855F7",
+    ),
+    "Mono Teal": (
+        "#0B3D3A", "#125E57", "#1F8579", "#2FA694", "#54C3B0",
+        "#8AD9CC", "#B7E8DF", "#5EEAD4", "#0E7490", "#99F6E4",
+    ),
+}

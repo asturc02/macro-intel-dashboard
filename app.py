@@ -22,13 +22,13 @@ import fx
 import metrics
 import utils
 
-BUILD_MARKER = "build: macro-intel v4 (iOS redesign)"
+BUILD_MARKER = "build: macro-intel v5 (top-menu + footer)"
 
 st.set_page_config(
     page_title="Macro Intelligence Dashboard",
     page_icon="🌐",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # --- iOS-style design system (GetVision-aligned) ----------------------------
@@ -121,6 +121,25 @@ st.markdown(
 
       /* Trim default header chrome */
       [data-testid="stHeader"] { background: transparent; }
+
+      /* Remove the sidebar entirely (controls now live in the top Menu) */
+      [data-testid="stSidebar"],
+      [data-testid="stSidebarCollapsedControl"],
+      [data-testid="collapsedControl"] { display: none !important; }
+
+      /* Top "Menu" popover trigger -> teal pill, right-aligned */
+      [data-testid="stPopover"] button {
+        border-radius: 999px; border: 1px solid var(--hair);
+        background: var(--raised); color: var(--text); font-weight: 600;
+      }
+      [data-testid="stPopover"] button:hover { background: var(--elevated); }
+
+      /* Footer */
+      .mi-footer { color: var(--text2); font-size: 0.85rem; line-height: 1.6; }
+      .mi-footer a { color: var(--accent); text-decoration: none; }
+      .mi-foot-h { color: var(--text); font-weight: 700; font-size: 0.72rem;
+                   letter-spacing: 0.06em; text-transform: uppercase;
+                   margin-bottom: 0.35rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -314,19 +333,19 @@ def _style_fig(fig: go.Figure, height: int = 420) -> go.Figure:
 
 
 # ============================================================================
-# Sidebar
+# Top menu, footer & shared controls
 # ============================================================================
-def render_sidebar() -> str:
-    """Render the sidebar and return the resolved FRED API key.
+def render_menu() -> str:
+    """Render the top-right ``☰ Menu`` popover and return the resolved FRED key.
+
+    Replaces the sidebar: the API key input and data refresh live in a compact
+    popover so the main canvas is uncluttered.
 
     Returns:
-        The API key to use (sidebar input takes precedence over the env key).
+        The API key to use (popover input takes precedence over the env key).
     """
-    with st.sidebar:
-        st.header("🌐 Macro Intelligence")
-        st.caption("Pre-open cockpit — rates, curves & carry across G10 + EM.")
-
-        st.subheader("🔑 FRED API key")
+    with st.popover("☰  Menu", use_container_width=True):
+        st.markdown("**🔑 FRED API key**")
         st.caption(
             "Free key from "
             "[fredaccount.stlouisfed.org](https://fredaccount.stlouisfed.org/apikeys). "
@@ -334,21 +353,76 @@ def render_sidebar() -> str:
         )
         user_key = st.text_input(
             "FRED API key", type="password", label_visibility="collapsed",
-            placeholder="Paste your free FRED API key…",
+            placeholder="Paste your free FRED API key…", key="fred_key_input",
         )
-        effective = (user_key or "").strip() or (config.FRED_API_KEY or "")
-
-        st.divider()
         if st.button("🔄 Refresh data", use_container_width=True):
             st.cache_data.clear()
             st.toast("Cache cleared — pulling fresh data.")
             st.rerun()
+    return (user_key or "").strip() or (config.FRED_API_KEY or "")
 
-        st.divider()
-        st.caption("**Data:** FRED (macro) · Frankfurter/ECB (FX)")
-        st.caption("**Related:** [Fed Sentiment](https://macro-sentiment-dashboard.streamlit.app/) · [Inflación Nowcast](https://inflacion-nowcast.streamlit.app/)")
-        st.caption(f"Built by **Cristopher Astur** · UBA Economist\n\n{BUILD_MARKER}")
-    return effective
+
+def render_footer() -> None:
+    """Render the bottom footer with Data & Info and Contact columns."""
+    st.divider()
+    left, right = st.columns(2)
+    with left:
+        st.markdown(
+            """
+            <div class="mi-footer">
+              <div class="mi-foot-h">Data &amp; Info</div>
+              Sources: <a href="https://fred.stlouisfed.org/">FRED</a> (St. Louis Fed)
+              &amp; <a href="https://www.frankfurter.app/">Frankfurter</a> / ECB.<br>
+              Portfolio project for educational purposes — <b>not financial advice</b>.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with right:
+        st.markdown(
+            f"""
+            <div class="mi-footer">
+              <div class="mi-foot-h">Contact</div>
+              Built by <b>Cristopher Astur</b> · UBA Economist<br>
+              <a href="mailto:asturcristopher@gmail.com">asturcristopher@gmail.com</a><br>
+              Related:
+              <a href="https://macro-sentiment-dashboard.streamlit.app/">Fed Sentiment</a> ·
+              <a href="https://inflacion-nowcast.streamlit.app/">Inflación Nowcast</a>
+              <div style="opacity:0.5; margin-top:0.4rem; font-size:0.75rem;">{BUILD_MARKER}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+def window_control(key: str, default: str = "5Y") -> int | None:
+    """Render a contextual history-window segmented control.
+
+    Args:
+        key: Unique Streamlit widget key (windows are per-section, not global).
+        default: Default window label.
+
+    Returns:
+        The number of years for the chosen window, or ``None`` for ``Max``.
+    """
+    label = st.segmented_control(
+        "History window", options=list(config.WINDOW_YEARS.keys()),
+        default=default, key=key,
+    )
+    return config.WINDOW_YEARS.get(label or default, config.WINDOW_YEARS[default])
+
+
+def palette_picker(key: str) -> tuple[str, ...]:
+    """Render a color-palette dropdown for comparison charts.
+
+    Args:
+        key: Unique Streamlit widget key.
+
+    Returns:
+        The tuple of hex colors for the selected palette.
+    """
+    name = st.selectbox("Chart colors", list(config.PALETTES), key=key)
+    return config.PALETTES[name]
 
 
 # ============================================================================
@@ -404,7 +478,6 @@ def module_carry(snap: pd.DataFrame) -> None:
 
     left, right = st.columns(2)
     with left:
-        st.markdown("**Real policy rate by currency**")
         rr = snap.dropna(subset=["Real Rate %"]).sort_values("Real Rate %")
         if rr.empty:
             st.info("No real-rate data resolved yet.")
@@ -421,11 +494,13 @@ def module_carry(snap: pd.DataFrame) -> None:
                     textposition="outside",
                 )
             )
-            fig.update_layout(xaxis_title="Real rate (pp)")
+            fig.update_layout(
+                title="Real policy rate by currency",
+                xaxis_title="Real rate (pp)", yaxis_title="Currency",
+            )
             st.plotly_chart(_style_fig(fig, 380), use_container_width=True)
 
     with right:
-        st.markdown("**Carry vs USD  vs  FX volatility**")
         sc = snap.dropna(subset=["Carry vs USD", "FX Vol %"])
         if sc.empty:
             st.info("No carry/vol data resolved yet.")
@@ -441,6 +516,7 @@ def module_carry(snap: pd.DataFrame) -> None:
                 )
             )
             fig.update_layout(
+                title="Carry vs USD vs FX volatility",
                 xaxis_title="Annualized FX vol (%)",
                 yaxis_title="Carry vs USD (pp)",
             )
@@ -448,18 +524,15 @@ def module_carry(snap: pd.DataFrame) -> None:
             st.plotly_chart(_style_fig(fig, 380), use_container_width=True)
 
 
-def module_curves(api_key: str, window_years: int | None) -> None:
+def module_curves(api_key: str) -> None:
     """Render the Yield Curve module (US curve, inversion, cross-country 10Y).
 
     Args:
         api_key: Resolved FRED key.
-        window_years: History window for time-series charts (``None`` = max).
     """
     st.subheader("Yield Curve Visualizer")
-    start = utils.window_start(window_years)
 
     # --- US par curve, now vs 6m/1y ago -----------------------------------
-    st.markdown("**US Treasury par curve** — current vs 6 & 12 months ago")
     curve_now, curve_6m, curve_12m, mats = [], [], [], []
     for label in config.US_CURVE_ORDER:
         s = get_series(config.US_CURVE[label], api_key, None)
@@ -482,15 +555,18 @@ def module_curves(api_key: str, window_years: int | None) -> None:
         fig.add_trace(go.Scatter(x=mats, y=curve_now, name="Now",
                                  line=dict(color=config.COLOR_ACCENT, width=3),
                                  mode="lines+markers"))
-        fig.update_layout(xaxis_title="Maturity", yaxis_title="Yield (%)")
+        fig.update_layout(title="US Treasury par curve — now vs 6 & 12 months ago",
+                          xaxis_title="Maturity", yaxis_title="Yield (%)")
         st.plotly_chart(_style_fig(fig, 380), use_container_width=True)
     else:
         st.info("US curve series did not resolve — check the FRED key / Data Health.")
 
     # --- Inversion & recession signals ------------------------------------
+    st.markdown("###### Rate history")
+    window_years = window_control("curves_window")
+    start = utils.window_start(window_years)
     left, right = st.columns(2)
     with left:
-        st.markdown("**10Y − 2Y spread** (inversion → recession signal)")
         sp = get_series(config.SPREAD_10Y_2Y, api_key, start)
         if sp.empty:
             st.info("Spread series unavailable.")
@@ -503,13 +579,12 @@ def module_curves(api_key: str, window_years: int | None) -> None:
             latest_val = float(sp.iloc[-1])
             state = "INVERTED ⚠️" if latest_val < 0 else "normal"
             fig.update_layout(
-                yaxis_title="Spread (pp)",
-                title=f"Current: {latest_val:+.2f} pp ({state})",
+                title=f"10Y − 2Y spread — {latest_val:+.2f} pp ({state})",
+                xaxis_title="Date", yaxis_title="Spread (pp)",
             )
             st.plotly_chart(_style_fig(fig, 340), use_container_width=True)
 
     with right:
-        st.markdown("**Cross-country 10Y yield** (latest)")
         rows = []
         for c in config.COUNTRIES:
             s = get_series(c.y10, api_key, None)
@@ -525,16 +600,21 @@ def module_curves(api_key: str, window_years: int | None) -> None:
                 x=vals, y=ccy, orientation="h", marker_color=config.COLOR_DOVE,
                 text=[f"{v:.2f}" for v in vals], textposition="outside",
             ))
-            fig.update_layout(xaxis_title="10Y yield (%)")
+            fig.update_layout(title="Cross-country 10Y yield (latest)",
+                              xaxis_title="10Y yield (%)", yaxis_title="Currency")
             st.plotly_chart(_style_fig(fig, 340), use_container_width=True)
 
     # --- Overlay selected 10Y histories -----------------------------------
-    st.markdown("**Overlay 10Y yield history**")
-    codes = st.multiselect(
-        "Economies", options=[c.code for c in config.COUNTRIES],
-        default=["US", "EA", "JP"], format_func=lambda x: config.COUNTRY_BY_CODE[x].name,
-        key="curve_overlay",
-    )
+    st.markdown("###### Overlay 10Y yield history")
+    ov1, ov2 = st.columns([3, 1])
+    with ov1:
+        codes = st.multiselect(
+            "Economies", options=[c.code for c in config.COUNTRIES],
+            default=["US", "EA", "JP"],
+            format_func=lambda x: config.COUNTRY_BY_CODE[x].name, key="curve_overlay",
+        )
+    with ov2:
+        palette = palette_picker("curve_palette")
     if codes:
         fig = go.Figure()
         for i, code in enumerate(codes):
@@ -544,21 +624,20 @@ def module_curves(api_key: str, window_years: int | None) -> None:
                 continue
             fig.add_trace(go.Scatter(
                 x=s.index, y=s.values, name=f"{c.currency} 10Y",
-                line=dict(color=config.PALETTE[i % len(config.PALETTE)]),
+                line=dict(color=palette[i % len(palette)]),
             ))
-        fig.update_layout(yaxis_title="Yield (%)")
+        fig.update_layout(title="10Y yield history",
+                          xaxis_title="Date", yaxis_title="Yield (%)")
         st.plotly_chart(_style_fig(fig, 380), use_container_width=True)
 
 
-def module_timeseries(api_key: str, window_years: int | None) -> None:
+def module_timeseries(api_key: str) -> None:
     """Render the multi-country / multi-metric time-series explorer.
 
     Args:
         api_key: Resolved FRED key.
-        window_years: History window (``None`` = max).
     """
     st.subheader("Time-Series Explorer")
-    start = utils.window_start(window_years)
 
     c1, c2 = st.columns([3, 2])
     with c1:
@@ -572,6 +651,13 @@ def module_timeseries(api_key: str, window_years: int | None) -> None:
             "Metric", options=list(config.METRIC_LABELS.keys()),
             format_func=lambda k: config.METRIC_LABELS[k], key="ts_metric",
         )
+
+    c3, c4 = st.columns([3, 1])
+    with c3:
+        window_years = window_control("ts_window")
+    with c4:
+        palette = palette_picker("ts_palette")
+    start = utils.window_start(window_years)
 
     dual = st.checkbox(
         "Add a second metric on a right axis (uses the first economy)",
@@ -596,7 +682,7 @@ def module_timeseries(api_key: str, window_years: int | None) -> None:
             continue
         fig.add_trace(go.Scatter(
             x=s.index, y=s.values, name=f"{c.currency} · {config.METRIC_LABELS[metric_key]}",
-            line=dict(color=config.PALETTE[i % len(config.PALETTE)]),
+            line=dict(color=palette[i % len(palette)]),
         ))
 
     if metric_key2:
@@ -612,7 +698,10 @@ def module_timeseries(api_key: str, window_years: int | None) -> None:
                 side="right", gridcolor=config.COLOR_GRID,
             ))
 
-    fig.update_layout(yaxis_title=config.METRIC_LABELS[metric_key])
+    fig.update_layout(
+        title=f"{config.METRIC_LABELS[metric_key]} over time",
+        xaxis_title="Date", yaxis_title=config.METRIC_LABELS[metric_key],
+    )
     st.plotly_chart(_style_fig(fig, 460), use_container_width=True)
 
 
@@ -666,8 +755,11 @@ def module_health(api_key: str, snap: pd.DataFrame) -> None:
 # Main
 # ============================================================================
 def main() -> None:
-    """Compose the page: header, sidebar, and the four analytical tabs."""
-    api_key = render_sidebar()
+    """Compose the page: top menu, hero header, tabs, and footer."""
+    # Top bar: title area + right-aligned Menu popover.
+    _, menu_col = st.columns([6, 1])
+    with menu_col:
+        api_key = render_menu()
 
     st.markdown(
         f"""
@@ -676,9 +768,13 @@ def main() -> None:
                       letter-spacing:0.09em; text-transform:uppercase;">
             Pre-open macro cockpit
           </div>
-          <h1 style="margin:0.15rem 0 0.25rem 0; font-size:2.35rem;">
+          <h1 style="margin:0.15rem 0 0.15rem 0; font-size:2.35rem;">
             Macro Intelligence
           </h1>
+          <div style="color:{config.COLOR_TEXT_SEC}; font-size:0.95rem;
+                      margin-bottom:0.3rem;">
+            by <b style="color:{config.COLOR_TEXT};">Cristopher Astur</b>
+          </div>
           <div style="color:{config.COLOR_TEXT_SEC}; font-size:1.02rem;">
             Monetary-policy divergence, real rates, carry-vs-USD & yield curves —
             G10 + key emerging markets.
@@ -692,16 +788,10 @@ def main() -> None:
         st.info(
             "**Add a free FRED API key to begin.** Get one in ~30s at "
             "[fredaccount.stlouisfed.org/apikeys](https://fredaccount.stlouisfed.org/apikeys) "
-            "and paste it into the sidebar. It powers all macro series (FX needs no key)."
+            "and paste it into the top **☰ Menu**. It powers all macro series "
+            "(FX needs no key)."
         )
         st.stop()
-
-    window_options = list(config.WINDOW_YEARS.keys())
-    window_label = st.segmented_control(
-        "History window", options=window_options, default="5Y",
-        key="global_window",
-    )
-    window_years = config.WINDOW_YEARS.get(window_label or "5Y", 5)
 
     with st.spinner("Pulling macro snapshot from FRED…"):
         warm_cache(api_key)          # parallel fan-out; fills the shared cache
@@ -713,18 +803,13 @@ def main() -> None:
     with tab1:
         module_carry(snap)
     with tab2:
-        module_curves(api_key, window_years)
+        module_curves(api_key)
     with tab3:
-        module_timeseries(api_key, window_years)
+        module_timeseries(api_key)
     with tab4:
         module_health(api_key, snap)
 
-    st.divider()
-    st.caption(
-        "⚠️ Portfolio project for educational purposes — not financial advice. "
-        "Sources: FRED (St. Louis Fed) & Frankfurter/ECB. "
-        "Built by **Cristopher Astur**, UBA Economist."
-    )
+    render_footer()
 
 
 if __name__ == "__main__":
