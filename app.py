@@ -10,7 +10,9 @@ live in ``fred.py``, ``fx.py``, and ``metrics.py``.
 
 from __future__ import annotations
 
+import datetime
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import quote
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -22,7 +24,7 @@ import fx
 import metrics
 import utils
 
-BUILD_MARKER = "build: macro-intel v8 (country drill-down)"
+BUILD_MARKER = "build: macro-intel v9 (calendar + wide table)"
 
 st.set_page_config(
     page_title="Macro Intelligence Dashboard",
@@ -45,7 +47,7 @@ st.markdown(
       }
       html, body, .stApp, [class*="css"] { font-family: var(--sf); }
       .stApp { background: var(--bg); }
-      .block-container { padding-top: 2.4rem; max-width: 1180px; }
+      .block-container { padding-top: 2.4rem; max-width: min(1720px, 96vw); }
 
       h1 { font-weight: 700; letter-spacing: -0.02em; }
       h2, h3 { font-weight: 650; letter-spacing: -0.01em; }
@@ -197,6 +199,20 @@ def metric_series(
 
 
 @st.cache_data(ttl=config.CACHE_TTL_SECONDS, show_spinner=False)
+def get_release_dates(release_id: int, api_key: str) -> list[str]:
+    """Cached wrapper around :func:`fred.fetch_release_dates`.
+
+    Args:
+        release_id: FRED release ID.
+        api_key: Resolved FRED key (part of the cache key).
+
+    Returns:
+        A list of ISO date strings (possibly empty).
+    """
+    return fred.fetch_release_dates(release_id, api_key=api_key)
+
+
+@st.cache_data(ttl=config.CACHE_TTL_SECONDS, show_spinner=False)
 def get_fx_vol(currency: str) -> float | None:
     """Cached annualized realized FX volatility versus USD.
 
@@ -240,6 +256,8 @@ def warm_cache(api_key: str) -> None:
             pool.submit(get_series, sid, api_key, None)
         for ccy in currencies:
             pool.submit(get_fx_vol, ccy)
+        for _name, rid, _tier in config.KEY_RELEASES:
+            pool.submit(get_release_dates, rid, api_key)
 
 
 @st.cache_data(ttl=config.CACHE_TTL_SECONDS, show_spinner=False)
@@ -924,6 +942,103 @@ def module_leading(api_key: str) -> None:
     st.plotly_chart(_style_fig(fig, 380), use_container_width=True)
 
 
+def _gcal_link(title: str, date_iso: str) -> str:
+    """Build a Google Calendar 'add event' template URL for an all-day event.
+
+    Args:
+        title: Event title.
+        date_iso: Event date, ISO ``YYYY-MM-DD``.
+
+    Returns:
+        A https://www.google.com/calendar/render template URL.
+    """
+    start = date_iso.replace("-", "")
+    end = (datetime.date.fromisoformat(date_iso) + datetime.timedelta(days=1)
+           ).isoformat().replace("-", "")
+    text = quote(f"{title} — US data release")
+    details = quote("US macro data release date (FRED schedule). Free feed has "
+                    "dates only, not consensus/forecast.")
+    return (f"https://www.google.com/calendar/render?action=TEMPLATE&text={text}"
+            f"&dates={start}/{end}&details={details}")
+
+
+def _build_ics(events: list[tuple[str, str]]) -> str:
+    """Build an iCalendar (.ics) document of all-day events.
+
+    Args:
+        events: List of ``(title, date_iso)`` pairs.
+
+    Returns:
+        The .ics text (CRLF-joined per the spec).
+    """
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0",
+             "PRODID:-//Macro Intelligence//US Calendar//EN", "CALSCALE:GREGORIAN"]
+    for i, (title, date_iso) in enumerate(events):
+        start = date_iso.replace("-", "")
+        end = (datetime.date.fromisoformat(date_iso) + datetime.timedelta(days=1)
+               ).isoformat().replace("-", "")
+        lines += ["BEGIN:VEVENT", f"UID:{start}-{i}@macro-intel",
+                  f"DTSTART;VALUE=DATE:{start}", f"DTEND;VALUE=DATE:{end}",
+                  f"SUMMARY:{title} (US data)", "END:VEVENT"]
+    lines.append("END:VCALENDAR")
+    return "\r\n".join(lines)
+
+
+def module_calendar(api_key: str) -> None:
+    """Render the US economic calendar (free FRED release schedule).
+
+    Args:
+        api_key: Resolved FRED key.
+    """
+    st.subheader("Economic Calendar — United States")
+    st.caption(
+        "Upcoming release dates for the major US indicators, from FRED's official "
+        "release schedule. The free feed provides the **dates**, not consensus / "
+        "forecast numbers (those require a paid provider)."
+    )
+    today = datetime.date.today()
+    today_iso = today.isoformat()
+
+    rows: list[dict] = []
+    ics_events: list[tuple[str, str]] = []
+    for name, rid, tier in config.KEY_RELEASES:
+        dates = sorted(d for d in get_release_dates(rid, api_key) if d >= today_iso)
+        if not dates:
+            continue
+        nxt = dates[0]
+        days = (datetime.date.fromisoformat(nxt) - today).days
+        rows.append({
+            "Release": name, "Next release": nxt, "In (days)": days,
+            "Impact": tier, "Add to Google Calendar": _gcal_link(name, nxt),
+        })
+        ics_events.extend((name, d) for d in dates[:4])
+
+    if not rows:
+        st.info("No upcoming release dates resolved.")
+        return
+
+    df = pd.DataFrame(rows).sort_values("In (days)").reset_index(drop=True)
+    st.dataframe(
+        df, use_container_width=True, hide_index=True,
+        column_config={
+            "In (days)": st.column_config.NumberColumn("In (days)", format="%d d"),
+            "Add to Google Calendar": st.column_config.LinkColumn(
+                "Add to Google Calendar", display_text="📅 Add"),
+        },
+    )
+
+    ics_events.sort(key=lambda e: e[1])
+    st.download_button(
+        "⬇️ Download .ics  (import into Google / Apple / Outlook)",
+        data=_build_ics(ics_events), file_name="us_macro_calendar.ics",
+        mime="text/calendar",
+    )
+    st.caption(
+        "The .ics bundles the next few dates of each release. Google Calendar → "
+        "Settings → Import & export → Import."
+    )
+
+
 def module_health(api_key: str, snap: pd.DataFrame) -> None:
     """Render the Data Health panel: which FRED series resolved, latest values.
 
@@ -1017,9 +1132,9 @@ def main() -> None:
         warm_cache(api_key)          # parallel fan-out; fills the shared cache
         snap = build_snapshot(api_key)
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
         ["Carry & Divergence", "Yield Curves", "Time-Series",
-         "Leading Indicators", "Data Health"]
+         "Leading Indicators", "Calendar", "Data Health"]
     )
     with tab1:
         module_carry(snap, api_key)
@@ -1030,6 +1145,8 @@ def main() -> None:
     with tab4:
         module_leading(api_key)
     with tab5:
+        module_calendar(api_key)
+    with tab6:
         module_health(api_key, snap)
 
     render_footer()

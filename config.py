@@ -39,7 +39,20 @@ FRED_API_KEY: str | None = os.getenv("FRED_API_KEY")
 
 # --- FRED API ---------------------------------------------------------------
 FRED_BASE_URL: str = "https://api.stlouisfed.org/fred/series/observations"
+FRED_RELEASE_DATES_URL: str = "https://api.stlouisfed.org/fred/release/dates"
 REQUEST_TIMEOUT_SECONDS: int = 20
+
+# --- Economic calendar: key US releases (FRED release IDs) ------------------
+# FRED publishes forward-looking release dates for these. Free data gives the
+# schedule (dates) but not consensus/forecast numbers. (name, release_id, tier).
+KEY_RELEASES: tuple[tuple[str, int, str], ...] = (
+    ("Employment Situation (NFP + unemployment)", 50, "High"),
+    ("Consumer Price Index (CPI)", 10, "High"),
+    ("Personal Income & Outlays (PCE)", 54, "High"),
+    ("Gross Domestic Product (GDP)", 53, "High"),
+    ("Producer Price Index (PPI)", 46, "Medium"),
+    ("Jobless Claims (weekly)", 180, "Medium"),
+)
 
 # --- FX (Frankfurter, ECB-sourced, no key) ----------------------------------
 FRANKFURTER_BASE_URL: str = "https://api.frankfurter.app"

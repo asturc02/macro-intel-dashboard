@@ -112,6 +112,43 @@ def fetch_series(
     return series.sort_index()
 
 
+def fetch_release_dates(
+    release_id: int, api_key: str | None = None, limit: int = 24
+) -> list[str]:
+    """Fetch scheduled release dates for a FRED release (newest first).
+
+    FRED publishes forward-looking dates for major releases, so this includes
+    upcoming dates as well as recent past ones.
+
+    Args:
+        release_id: The FRED release ID (e.g. 10 for CPI).
+        api_key: Optional override key; falls back to the configured key.
+        limit: Max number of dates to return.
+
+    Returns:
+        A list of ISO ``YYYY-MM-DD`` date strings, or ``[]`` on failure.
+    """
+    key = _require_key(api_key)
+    try:
+        resp = requests.get(
+            config.FRED_RELEASE_DATES_URL,
+            params={
+                "release_id": release_id,
+                "api_key": key,
+                "file_type": "json",
+                "sort_order": "desc",
+                "limit": limit,
+                "include_release_dates_with_no_data": "true",
+            },
+            timeout=config.REQUEST_TIMEOUT_SECONDS,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except (requests.RequestException, ValueError):
+        return []
+    return [d.get("date") for d in payload.get("release_dates", []) if d.get("date")]
+
+
 def latest(series: pd.Series) -> tuple[pd.Timestamp | None, float | None]:
     """Return the most recent (date, value) pair of a series, or ``(None, None)``.
 
