@@ -22,7 +22,7 @@ import fx
 import metrics
 import utils
 
-BUILD_MARKER = "build: macro-intel v7 (chart title/legend/label fixes)"
+BUILD_MARKER = "build: macro-intel v8 (country drill-down)"
 
 st.set_page_config(
     page_title="Macro Intelligence Dashboard",
@@ -448,11 +448,79 @@ def palette_picker(key: str) -> tuple[str, ...]:
 # ============================================================================
 # Modules
 # ============================================================================
-def module_carry(snap: pd.DataFrame) -> None:
+def render_country_detail(code: str, api_key: str, snap: pd.DataFrame) -> None:
+    """Render a TradingEconomics-style deep-dive for one economy.
+
+    Shows a header, a grid of current-value tiles, and a 2×2 grid of historical
+    charts (policy rate, CPI, unemployment, 10Y) over a selectable window.
+
+    Args:
+        code: Country code selected in the matrix.
+        api_key: Resolved FRED key.
+        snap: The cross-country snapshot (for current values).
+    """
+    c = config.COUNTRY_BY_CODE[code]
+    row = snap.loc[code]
+    flag = config.FLAGS.get(code, "")
+
+    st.divider()
+    head, clear = st.columns([5, 1])
+    with head:
+        st.markdown(f"### {flag}  {c.name} — deep dive")
+        tag = " · emerging market" if c.is_emerging else ""
+        st.caption(
+            f"{c.currency} · {c.central_bank} · inflation target "
+            f"{c.inflation_target:.1f}%{tag}"
+        )
+    with clear:
+        if st.button("✕ Close", use_container_width=True, key=f"close_{code}"):
+            st.session_state.pop("carry_table", None)
+            st.rerun()
+
+    # --- Current-value tiles ------------------------------------------------
+    r1 = st.columns(4)
+    r1[0].metric("Policy rate", utils.fmt(row["Policy %"], "%"))
+    r1[1].metric("CPI YoY", utils.fmt(row["CPI YoY %"], "%"))
+    r1[2].metric("Real rate", utils.fmt(row["Real Rate %"], "%"))
+    r1[3].metric("Stance", row["Stance"])
+    r2 = st.columns(4)
+    r2[0].metric("GDP (annualized)", utils.fmt(row["GDP %"], "%"))
+    r2[1].metric("Unemployment", utils.fmt(row["Unemp %"], "%"))
+    r2[2].metric("10Y yield", utils.fmt(row["10Y %"], "%"))
+    r2[3].metric("10Y vs US", utils.fmt_signed(row["10Y vs US"], " pp"))
+
+    # --- Historical charts (2×2) -------------------------------------------
+    window_years = window_control(f"detail_window_{code}", default="5Y")
+    start = utils.window_start(window_years)
+    charts = [
+        ("policy_rate", "Policy rate (%)"),
+        ("cpi_yoy", "CPI YoY (%)"),
+        ("unemployment", "Unemployment (%)"),
+        ("y10", "10Y yield (%)"),
+    ]
+    grid = st.columns(2)
+    for i, (metric, label) in enumerate(charts):
+        with grid[i % 2]:
+            s = metric_series(c, metric, api_key, start)
+            if s.empty:
+                st.info(f"{label}: no free data for {c.name}.")
+                continue
+            fig = go.Figure(go.Scatter(
+                x=s.index, y=s.values, mode="lines",
+                line=dict(color=config.COLOR_ACCENT, width=2),
+                fill="tozeroy", fillcolor="rgba(31,133,121,0.08)",
+            ))
+            fig.update_layout(title=label, xaxis_title="Date", yaxis_title="")
+            st.plotly_chart(_style_fig(fig, 280), use_container_width=True,
+                            key=f"detail_{code}_{metric}")
+
+
+def module_carry(snap: pd.DataFrame, api_key: str) -> None:
     """Render the Carry Trade & Monetary Divergence module.
 
     Args:
         snap: The cross-country snapshot DataFrame.
+        api_key: Resolved FRED key (for the country deep-dive charts).
     """
     st.subheader("Carry Trade & Monetary Divergence Matrix")
     st.caption(
@@ -493,14 +561,23 @@ def module_carry(snap: pd.DataFrame) -> None:
     col_cfg["GDP %"] = st.column_config.NumberColumn(
         "GDP %", format="%.2f", help="Latest quarter real GDP growth, annualized"
     )
-    # Expand the table so every economy is visible without scrolling.
-    st.dataframe(
+    st.caption("💡 Click any row to open that economy's deep-dive.")
+    # Expand the table so every economy is visible without scrolling, and make
+    # rows selectable to drill into a country detail view.
+    event = st.dataframe(
         snap[display_cols],
         use_container_width=True,
         hide_index=True,
         height=(len(snap) + 1) * 35 + 3,
         column_config=col_cfg,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="carry_table",
     )
+    selected = list(event.selection["rows"]) if event is not None else []
+    if selected:
+        render_country_detail(snap.index[selected[0]], api_key, snap)
+        return
 
     left, right = st.columns(2)
     with left:
@@ -945,7 +1022,7 @@ def main() -> None:
          "Leading Indicators", "Data Health"]
     )
     with tab1:
-        module_carry(snap)
+        module_carry(snap, api_key)
     with tab2:
         module_curves(api_key)
     with tab3:

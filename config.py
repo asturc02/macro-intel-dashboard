@@ -236,6 +236,12 @@ COUNTRIES: tuple[Country, ...] = (
     ),
 )
 
+# Flag emoji per economy, for the country deep-dive header.
+FLAGS: dict[str, str] = {
+    "US": "🇺🇸", "EA": "🇪🇺", "JP": "🇯🇵", "GB": "🇬🇧", "AU": "🇦🇺",
+    "NZ": "🇳🇿", "CA": "🇨🇦", "NO": "🇳🇴", "BR": "🇧🇷", "AR": "🇦🇷",
+}
+
 # Fast lookup by code.
 COUNTRY_BY_CODE: dict[str, Country] = {c.code: c for c in COUNTRIES}
 BASE_COUNTRY: str = "US"  # carry / differentials are measured against the USD leg
