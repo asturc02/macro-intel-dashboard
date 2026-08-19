@@ -1,0 +1,250 @@
+"""Configuration, constants, and the country/series registry.
+
+Central place for the FRED API key (read from the environment or Streamlit
+secrets — never hardcoded), the map of G10 + emerging-market economies to their
+FRED series IDs, monetary-policy targets, and UI theme colors. Consumed by the
+``fred``, ``fx``, ``metrics``, and ``app`` modules.
+
+Series-ID note
+--------------
+International macro series come mostly from the OECD "Main Economic Indicators"
+collection mirrored on FRED, which uses consistent naming:
+
+* ``IRLTLT01<CC>M156N`` — 10-year government bond yield (monthly, %)
+* ``IRSTCB01<CC>M156N`` — central-bank / immediate policy rate (monthly, %)
+* ``CPALTT01<CC>M659N`` — CPI, all items, YoY % (monthly; some countries Q)
+* ``LRHUTTTT<CC>M156S`` — harmonized unemployment rate (monthly, % SA)
+
+Coverage is intentionally broad but shallow: where a country lacks a clean free
+series the dashboard degrades gracefully to ``n/a`` rather than failing. The
+built-in **Data Health** panel shows exactly which series resolved.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load .env from this module's directory explicitly, so the key is found even
+# when Streamlit is launched from a different working directory.
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
+# --- Secrets (environment / Streamlit secrets only) -------------------------
+# FRED API keys are free (https://fredaccount.stlouisfed.org/apikeys). Read from
+# the environment here; the app also accepts a key pasted into the sidebar so it
+# runs on Streamlit Cloud without committing anything.
+FRED_API_KEY: str | None = os.getenv("FRED_API_KEY")
+
+# --- FRED API ---------------------------------------------------------------
+FRED_BASE_URL: str = "https://api.stlouisfed.org/fred/series/observations"
+REQUEST_TIMEOUT_SECONDS: int = 20
+
+# --- FX (Frankfurter, ECB-sourced, no key) ----------------------------------
+FRANKFURTER_BASE_URL: str = "https://api.frankfurter.app"
+
+# --- Caching ----------------------------------------------------------------
+BASE_DIR: Path = Path(__file__).resolve().parent
+DATA_DIR: Path = BASE_DIR / "data"
+CACHE_TTL_SECONDS: int = 60 * 60 * 6  # 6h: macro series update slowly.
+
+# --- Monetary-policy stance thresholds --------------------------------------
+# Rule-based, transparent classification (no LLM needed): combine the 6-month
+# change in the policy rate with the gap between CPI YoY and the inflation
+# target. Deterministic and defensible in an interview.
+STANCE_RATE_DELTA: float = 0.10   # pp move over 6m that counts as tightening/easing
+STANCE_CPI_GAP: float = 1.00      # pp above/below target that adds hawk/dove pressure
+
+HAWK: str = "Hawk"
+NEUTRAL: str = "Neutral"
+DOVE: str = "Dove"
+
+# --- US Treasury par curve (daily, very reliable) ---------------------------
+# Maturity label -> FRED series ID. Used by the Yield Curve module for the deep,
+# guaranteed-solid US curve and the 10Y-2Y inversion signal.
+US_CURVE: dict[str, str] = {
+    "3M": "DGS3MO",
+    "1Y": "DGS1",
+    "2Y": "DGS2",
+    "5Y": "DGS5",
+    "10Y": "DGS10",
+    "20Y": "DGS20",
+    "30Y": "DGS30",
+}
+US_CURVE_ORDER: tuple[str, ...] = ("3M", "1Y", "2Y", "5Y", "10Y", "20Y", "30Y")
+
+# Ready-made spread series (daily) for the inversion / recession indicators.
+SPREAD_10Y_2Y: str = "T10Y2Y"
+SPREAD_10Y_3M: str = "T10Y3M"
+
+
+class Country:
+    """Static description of one economy and its FRED series IDs.
+
+    Attributes:
+        code: Short display code (e.g. ``"US"``).
+        name: Human-readable country/area name.
+        currency: ISO currency code (e.g. ``"USD"``).
+        central_bank: Name of the monetary authority.
+        inflation_target: Central-bank inflation target, in percent.
+        policy_rate: FRED series ID for the policy rate. For most non-US/EA
+            economies this is a money-market proxy (3-month interbank or the
+            immediate/overnight rate), since the exact target rate is not
+            published as a current free FRED series — labeled as such in the UI.
+        cpi_yoy: FRED series ID for CPI. Either an already-computed YoY series or
+            a price *index* (see ``cpi_is_index``).
+        unemployment: FRED series ID for the unemployment rate.
+        y10: FRED series ID for the 10-year government bond yield.
+        cpi_is_index: When ``True``, ``cpi_yoy`` points at a price index and YoY
+            must be computed from it (used for US/EA, whose live series are
+            indices rather than pre-computed growth rates).
+        is_emerging: Flag used to visually group EM economies apart from G10.
+    """
+
+    def __init__(
+        self,
+        code: str,
+        name: str,
+        currency: str,
+        central_bank: str,
+        inflation_target: float,
+        policy_rate: str | None,
+        cpi_yoy: str | None,
+        unemployment: str | None,
+        y10: str | None,
+        cpi_is_index: bool = False,
+        is_emerging: bool = False,
+    ) -> None:
+        self.code = code
+        self.name = name
+        self.currency = currency
+        self.central_bank = central_bank
+        self.inflation_target = inflation_target
+        self.policy_rate = policy_rate
+        self.cpi_yoy = cpi_yoy
+        self.unemployment = unemployment
+        self.y10 = y10
+        self.cpi_is_index = cpi_is_index
+        self.is_emerging = is_emerging
+
+
+# G10 + key emerging markets. Germany (DE) stands in for the euro area's bond
+# market (the Bund is the EUR benchmark); the ECB policy rate is used for EUR.
+# Series IDs below were validated live against FRED. Because the OECD "MEI"
+# collection froze many pre-computed rate/CPI series on FRED (~2024-25), current
+# free coverage is: 10Y yields & unemployment (fresh, all G10); US/EA policy &
+# CPI (fresh); other G10 policy via money-market proxies (fresh); other G10 CPI
+# via OECD growth series (lag ~1yr); EM policy/curve largely unavailable. The
+# Data Health tab surfaces the exact vintage of every cell.
+COUNTRIES: tuple[Country, ...] = (
+    Country(
+        code="US", name="United States", currency="USD",
+        central_bank="Federal Reserve", inflation_target=2.0,
+        policy_rate="DFEDTARU",           # Fed funds target, upper bound (daily)
+        cpi_yoy="CPIAUCSL", cpi_is_index=True,   # index -> YoY computed (live)
+        unemployment="UNRATE",
+        y10="IRLTLT01USM156N",
+    ),
+    Country(
+        code="EA", name="Euro Area", currency="EUR",
+        central_bank="ECB", inflation_target=2.0,
+        policy_rate="ECBDFR",             # ECB deposit facility rate (key rate)
+        cpi_yoy="CP0000EZ19M086NEST", cpi_is_index=True,  # Eurostat HICP index
+        unemployment="LRHUTTTTDEM156S",   # Germany proxy (live)
+        y10="IRLTLT01DEM156N",            # Bund 10Y (EUR benchmark)
+    ),
+    Country(
+        code="JP", name="Japan", currency="JPY",
+        central_bank="Bank of Japan", inflation_target=2.0,
+        policy_rate="IR3TIB01JPM156N",    # 3m interbank (policy proxy)
+        cpi_yoy="FPCPITOTLZGJPN",         # World Bank annual CPI YoY (live-ish)
+        unemployment="LRHUTTTTJPM156S",
+        y10="IRLTLT01JPM156N",
+    ),
+    Country(
+        code="GB", name="United Kingdom", currency="GBP",
+        central_bank="Bank of England", inflation_target=2.0,
+        policy_rate="IRSTCI01GBM156N",    # immediate rate (Bank Rate proxy)
+        cpi_yoy="CPALTT01GBM659N",
+        unemployment="LRHUTTTTGBM156S",
+        y10="IRLTLT01GBM156N",
+    ),
+    Country(
+        code="AU", name="Australia", currency="AUD",
+        central_bank="Reserve Bank of Australia", inflation_target=2.5,
+        policy_rate="IRSTCI01AUM156N",    # immediate rate (cash rate proxy)
+        cpi_yoy="CPALTT01AUQ659N",        # quarterly
+        unemployment="LRHUTTTTAUM156S",
+        y10="IRLTLT01AUM156N",
+    ),
+    Country(
+        code="NZ", name="New Zealand", currency="NZD",
+        central_bank="RBNZ", inflation_target=2.0,
+        policy_rate="IR3TIB01NZM156N",    # 3m interbank (OCR proxy)
+        cpi_yoy="FPCPITOTLZGNZL",         # World Bank annual (OECD quarterly froze 2023)
+        unemployment="LRHUTTTTNZQ156S",   # quarterly
+        y10="IRLTLT01NZM156N",
+    ),
+    Country(
+        code="CA", name="Canada", currency="CAD",
+        central_bank="Bank of Canada", inflation_target=2.0,
+        policy_rate="IR3TIB01CAM156N",    # 3m interbank (policy proxy)
+        cpi_yoy="CPALTT01CAM659N",
+        unemployment="LRHUTTTTCAM156S",
+        y10="IRLTLT01CAM156N",
+    ),
+    Country(
+        code="NO", name="Norway", currency="NOK",
+        central_bank="Norges Bank", inflation_target=2.0,
+        policy_rate="IRSTCI01NOM156N",    # immediate rate (policy proxy)
+        cpi_yoy="CPALTT01NOM659N",
+        unemployment="LRHUTTTTNOM156S",
+        y10="IRLTLT01NOM156N",
+    ),
+    # --- Emerging markets (free-data gaps expected; shown honestly as n/a) ---
+    Country(
+        code="BR", name="Brazil", currency="BRL",
+        central_bank="Banco Central do Brasil", inflation_target=3.0,
+        policy_rate=None,                 # Selic not on free FRED; n/a
+        cpi_yoy="FPCPITOTLZGBRA",         # World Bank annual CPI YoY
+        unemployment=None,                # no live free series; n/a
+        y10=None,                         # no clean free curve; n/a
+        is_emerging=True,
+    ),
+    Country(
+        code="AR", name="Argentina", currency="ARS",
+        central_bank="BCRA", inflation_target=0.0,
+        policy_rate=None,                 # no clean free series; n/a
+        cpi_yoy="FPCPITOTLZGARG",         # World Bank annual CPI %, best-effort
+        unemployment=None,
+        y10=None,
+        is_emerging=True,
+    ),
+)
+
+# Fast lookup by code.
+COUNTRY_BY_CODE: dict[str, Country] = {c.code: c for c in COUNTRIES}
+BASE_COUNTRY: str = "US"  # carry / differentials are measured against the USD leg
+
+# --- Time-series explorer -------------------------------------------------
+METRIC_LABELS: dict[str, str] = {
+    "policy_rate": "Policy Rate (%)",
+    "cpi_yoy": "CPI YoY (%)",
+    "unemployment": "Unemployment (%)",
+    "y10": "10Y Gov. Bond Yield (%)",
+}
+WINDOW_YEARS: dict[str, int | None] = {"1Y": 1, "2Y": 2, "5Y": 5, "Max": None}
+
+# --- Theme (Bloomberg-terminal-inspired dark palette) -----------------------
+COLOR_BG: str = "#0E1117"
+COLOR_HAWK: str = "#EF4444"   # red  — tightening
+COLOR_DOVE: str = "#22D3EE"   # cyan — easing
+COLOR_NEUTRAL: str = "#A3A3A3"
+COLOR_ACCENT: str = "#F5A623"  # amber accent
+COLOR_GRID: str = "#1F2530"
+# Qualitative palette for multi-country overlays.
+PALETTE: tuple[str, ...] = (
+    "#F5A623", "#22D3EE", "#EF4444", "#A78BFA", "#34D399",
+    "#F472B6", "#60A5FA", "#FBBF24", "#FB7185", "#4ADE80",
+)
