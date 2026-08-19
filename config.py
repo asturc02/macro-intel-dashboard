@@ -236,15 +236,22 @@ METRIC_LABELS: dict[str, str] = {
 }
 WINDOW_YEARS: dict[str, int | None] = {"1Y": 1, "2Y": 2, "5Y": 5, "Max": None}
 
-# --- Theme (Bloomberg-terminal-inspired dark palette) -----------------------
-COLOR_BG: str = "#0E1117"
-COLOR_HAWK: str = "#EF4444"   # red  — tightening
-COLOR_DOVE: str = "#22D3EE"   # cyan — easing
-COLOR_NEUTRAL: str = "#A3A3A3"
-COLOR_ACCENT: str = "#F5A623"  # amber accent
-COLOR_GRID: str = "#1F2530"
-# Qualitative palette for multi-country overlays.
+# --- Theme (GetVision-aligned iOS dark system) ------------------------------
+# Deep-navy layered surfaces, a single teal brand accent used sparingly, and
+# jewel-tone data colors (emerald/rose/amber/violet). Depth comes from surface
+# layering (base -> raised -> elevated), not heavy borders or shadows.
+COLOR_BG: str = "#0A0E1A"        # base app background
+COLOR_RAISED: str = "#151B2C"    # card surface
+COLOR_ELEVATED: str = "#1E263D"  # raised card / hover / muted bars
+COLOR_ACCENT: str = "#1F8579"    # brand teal (CTAs, active, hero lines)
+COLOR_HAWK: str = "#EF4444"      # rose   — restrictive / hawkish
+COLOR_DOVE: str = "#10B981"      # emerald — accommodative / dovish
+COLOR_NEUTRAL: str = "#6B7488"   # slate — neutral / tertiary
+COLOR_TEXT: str = "#E7ECF3"      # primary text
+COLOR_TEXT_SEC: str = "#9AA6B8"  # secondary text
+COLOR_GRID: str = "rgba(255,255,255,0.06)"
+# Qualitative jewel-tone palette for multi-country overlays.
 PALETTE: tuple[str, ...] = (
-    "#F5A623", "#22D3EE", "#EF4444", "#A78BFA", "#34D399",
-    "#F472B6", "#60A5FA", "#FBBF24", "#FB7185", "#4ADE80",
+    "#1F8579", "#10B981", "#8B5CF6", "#F59E0B", "#EF4444",
+    "#22D3EE", "#60A5FA", "#F472B6", "#4ADE80", "#FBBF24",
 )

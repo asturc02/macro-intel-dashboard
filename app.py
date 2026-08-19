@@ -10,6 +10,8 @@ live in ``fred.py``, ``fx.py``, and ``metrics.py``.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -20,7 +22,7 @@ import fx
 import metrics
 import utils
 
-BUILD_MARKER = "build: macro-intel v3"
+BUILD_MARKER = "build: macro-intel v4 (iOS redesign)"
 
 st.set_page_config(
     page_title="Macro Intelligence Dashboard",
@@ -29,15 +31,96 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# --- Custom dark, terminal-inspired styling ---------------------------------
+# --- iOS-style design system (GetVision-aligned) ----------------------------
+# Deep-navy surfaces, teal accent, rounded layered cards, SF-style typography.
 st.markdown(
     """
     <style>
-      .stApp { background-color: #0E1117; }
-      h1, h2, h3 { letter-spacing: 0.2px; }
-      .block-container { padding-top: 2rem; }
-      div[data-testid="stMetricValue"] { font-variant-numeric: tabular-nums; }
-      .mono { font-family: 'SFMono-Regular', Consolas, monospace; }
+      :root {
+        --bg: #0A0E1A; --raised: #151B2C; --elevated: #1E263D;
+        --accent: #1F8579; --text: #E7ECF3; --text2: #9AA6B8;
+        --hair: rgba(255,255,255,0.06);
+        --sf: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+              "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+      html, body, .stApp, [class*="css"] { font-family: var(--sf); }
+      .stApp { background: var(--bg); }
+      .block-container { padding-top: 2.4rem; max-width: 1180px; }
+
+      h1 { font-weight: 700; letter-spacing: -0.02em; }
+      h2, h3 { font-weight: 650; letter-spacing: -0.01em; }
+      [data-testid="stCaptionContainer"], .stCaption { color: var(--text2); }
+
+      /* Hero metric tiles -> rounded raised cards, big tabular numbers */
+      [data-testid="stMetric"] {
+        background: var(--raised); border: 1px solid var(--hair);
+        border-radius: 18px; padding: 1rem 1.15rem;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.25);
+      }
+      [data-testid="stMetricLabel"] p {
+        font-size: 0.72rem; font-weight: 600; letter-spacing: 0.02em;
+        text-transform: uppercase; color: var(--text2);
+      }
+      [data-testid="stMetricValue"] {
+        font-variant-numeric: tabular-nums; font-weight: 700;
+        letter-spacing: -0.02em;
+      }
+
+      /* Charts sit on their own rounded cards */
+      [data-testid="stPlotlyChart"] {
+        background: var(--raised); border: 1px solid var(--hair);
+        border-radius: 18px; padding: 0.6rem 0.7rem;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.25);
+      }
+
+      /* Dataframe -> rounded card */
+      [data-testid="stDataFrame"] {
+        border-radius: 16px; overflow: hidden; border: 1px solid var(--hair);
+      }
+
+      /* Tabs -> iOS segmented control */
+      .stTabs [data-baseweb="tab-list"] {
+        gap: 4px; background: var(--raised); padding: 5px;
+        border-radius: 14px; border: 1px solid var(--hair);
+      }
+      .stTabs [data-baseweb="tab"] {
+        height: 38px; border-radius: 10px; padding: 0 18px;
+        color: var(--text2); font-weight: 600; font-size: 0.9rem;
+      }
+      .stTabs [data-baseweb="tab"]:hover { color: var(--text); }
+      .stTabs [aria-selected="true"] {
+        background: var(--accent) !important; color: #fff !important;
+      }
+      .stTabs [data-baseweb="tab-highlight"],
+      .stTabs [data-baseweb="tab-border"] { background: transparent !important; }
+
+      /* Buttons -> teal pills */
+      .stButton > button {
+        border-radius: 999px; border: 0; background: var(--accent);
+        color: #fff; font-weight: 600; padding: 0.5rem 1.1rem;
+        transition: filter 0.15s ease;
+      }
+      .stButton > button:hover { filter: brightness(1.08); color: #fff; }
+
+      /* Segmented control (history window) accent */
+      [data-testid="stSegmentedControl"] button[aria-checked="true"],
+      [data-baseweb="segmented-control"] [aria-checked="true"] {
+        background: var(--accent) !important; color: #fff !important;
+      }
+
+      /* Inputs / multiselect -> rounded, raised */
+      [data-baseweb="select"] > div, .stTextInput input,
+      [data-baseweb="input"] {
+        border-radius: 12px !important; background: var(--raised) !important;
+      }
+      [data-baseweb="tag"] { background: var(--accent) !important; border-radius: 8px !important; }
+
+      /* Sidebar */
+      [data-testid="stSidebar"] { background: #0C1120; border-right: 1px solid var(--hair); }
+      [data-testid="stSidebar"] .stButton > button { width: 100%; }
+
+      /* Trim default header chrome */
+      [data-testid="stHeader"] { background: transparent; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -105,6 +188,35 @@ def get_fx_vol(currency: str) -> float | None:
         Annualized vol in percent, or ``None``.
     """
     return fx.annualized_vol(currency)
+
+
+def warm_cache(api_key: str) -> None:
+    """Pre-fetch all snapshot/health series and FX vols in parallel.
+
+    FRED latency is highly variable; fetching ~50 series sequentially can take
+    over a minute on a cold cache. Fanning the requests out across a thread pool
+    turns that into roughly one round-trip. Each call populates the same
+    ``st.cache_data`` entries the rest of the app reads, so subsequent access is
+    an instant cache hit. Safe because the target functions perform pure HTTP
+    (no Streamlit calls) inside the worker threads.
+
+    Args:
+        api_key: Resolved FRED key.
+    """
+    series_ids: set[str] = set(config.US_CURVE.values())
+    series_ids.update({config.SPREAD_10Y_2Y, config.SPREAD_10Y_3M})
+    for c in config.COUNTRIES:
+        for attr in ("policy_rate", "cpi_yoy", "unemployment", "y10"):
+            sid = getattr(c, attr)
+            if sid:
+                series_ids.add(sid)
+    currencies = [c.currency for c in config.COUNTRIES if c.currency != "USD"]
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        for sid in series_ids:
+            pool.submit(get_series, sid, api_key, None)
+        for ccy in currencies:
+            pool.submit(get_fx_vol, ccy)
 
 
 @st.cache_data(ttl=config.CACHE_TTL_SECONDS, show_spinner=False)
@@ -178,17 +290,26 @@ def _style_fig(fig: go.Figure, height: int = 420) -> go.Figure:
     Returns:
         The same figure, restyled in place.
     """
+    sf_font = '-apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif'
     fig.update_layout(
         template="plotly_dark",
-        paper_bgcolor=config.COLOR_BG,
-        plot_bgcolor=config.COLOR_BG,
+        paper_bgcolor="rgba(0,0,0,0)",   # inherit the card surface behind it
+        plot_bgcolor="rgba(0,0,0,0)",
         height=height,
-        margin=dict(l=10, r=10, t=40, b=10),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+        margin=dict(l=10, r=10, t=44, b=10),
+        font=dict(family=sf_font, color=config.COLOR_TEXT_SEC, size=13),
+        title=dict(font=dict(family=sf_font, color=config.COLOR_TEXT, size=15)),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0,
+                    font=dict(color=config.COLOR_TEXT_SEC)),
         hovermode="x unified",
+        hoverlabel=dict(bgcolor=config.COLOR_ELEVATED, font_size=12,
+                        font_family=sf_font, bordercolor="rgba(0,0,0,0)"),
+        colorway=list(config.PALETTE),
     )
-    fig.update_xaxes(gridcolor=config.COLOR_GRID, zeroline=False)
-    fig.update_yaxes(gridcolor=config.COLOR_GRID, zeroline=False)
+    fig.update_xaxes(gridcolor=config.COLOR_GRID, zeroline=False,
+                     linecolor=config.COLOR_GRID)
+    fig.update_yaxes(gridcolor=config.COLOR_GRID, zeroline=False,
+                     linecolor=config.COLOR_GRID)
     return fig
 
 
@@ -376,7 +497,7 @@ def module_curves(api_key: str, window_years: int | None) -> None:
         else:
             fig = go.Figure(go.Scatter(
                 x=sp.index, y=sp.values, line=dict(color=config.COLOR_ACCENT),
-                fill="tozeroy", fillcolor="rgba(245,166,35,0.15)", name="10Y-2Y",
+                fill="tozeroy", fillcolor="rgba(31,133,121,0.18)", name="10Y-2Y",
             ))
             fig.add_hline(y=0, line_color=config.COLOR_HAWK, line_width=1)
             latest_val = float(sp.iloc[-1])
@@ -548,10 +669,23 @@ def main() -> None:
     """Compose the page: header, sidebar, and the four analytical tabs."""
     api_key = render_sidebar()
 
-    st.title("🌐 Macro Intelligence, Carry & Yield-Curve Dashboard")
-    st.caption(
-        "Monetary-policy divergence, real rates, carry-vs-USD, the US yield curve "
-        "and cross-country rates for G10 + key EM — a pre-open macro cockpit."
+    st.markdown(
+        f"""
+        <div style="margin: 0 0 0.6rem 0;">
+          <div style="color:{config.COLOR_ACCENT}; font-weight:700; font-size:0.78rem;
+                      letter-spacing:0.09em; text-transform:uppercase;">
+            Pre-open macro cockpit
+          </div>
+          <h1 style="margin:0.15rem 0 0.25rem 0; font-size:2.35rem;">
+            Macro Intelligence
+          </h1>
+          <div style="color:{config.COLOR_TEXT_SEC}; font-size:1.02rem;">
+            Monetary-policy divergence, real rates, carry-vs-USD & yield curves —
+            G10 + key emerging markets.
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
     if not api_key:
@@ -562,17 +696,19 @@ def main() -> None:
         )
         st.stop()
 
-    window_label = st.radio(
-        "History window", options=list(config.WINDOW_YEARS.keys()),
-        index=2, horizontal=True, key="global_window",
+    window_options = list(config.WINDOW_YEARS.keys())
+    window_label = st.segmented_control(
+        "History window", options=window_options, default="5Y",
+        key="global_window",
     )
-    window_years = config.WINDOW_YEARS[window_label]
+    window_years = config.WINDOW_YEARS.get(window_label or "5Y", 5)
 
     with st.spinner("Pulling macro snapshot from FRED…"):
+        warm_cache(api_key)          # parallel fan-out; fills the shared cache
         snap = build_snapshot(api_key)
 
     tab1, tab2, tab3, tab4 = st.tabs(
-        ["🎯 Carry & Divergence", "📉 Yield Curves", "📈 Time-Series", "🩺 Data Health"]
+        ["Carry & Divergence", "Yield Curves", "Time-Series", "Data Health"]
     )
     with tab1:
         module_carry(snap)
