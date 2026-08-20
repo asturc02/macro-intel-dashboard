@@ -23,6 +23,10 @@ import requests
 import config
 
 _HEADERS: dict[str, str] = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+_OECD_PRICES: str = (
+    "https://sdmx.oecd.org/public/rest/data/"
+    "OECD.SDD.TPS,DSD_PRICES@DF_PRICES_ALL,1.0/"
+)
 # National feeds can return large payloads (ONS ~120KB, BCB ~120KB); give them a
 # longer timeout so they survive the parallel cold-start fan-out.
 _T = max(35, config.REQUEST_TIMEOUT_SECONDS)
@@ -213,6 +217,54 @@ def jp_cpi_yoy() -> pd.Series:
         if 1 <= month <= 12:
             dates.append(pd.Timestamp(year, month, 1))
             vals.append(value)
+    return pd.Series(vals, index=pd.DatetimeIndex(dates)).sort_index()
+
+
+# --- New Zealand ------------------------------------------------------------
+def nz_cpi_yoy() -> pd.Series:
+    """New Zealand all-items CPI YoY %, from the OECD SDMX API (no key).
+
+    NZ CPI is quarterly and FRED's mirror is stale, so this hits the OECD prices
+    dataflow directly. It queries the NZ quarterly block and filters to
+    MEASURE=CPI, EXPENDITURE=_T (all items), UNIT_MEASURE=PA, TRANSFORMATION=GY
+    (year-on-year growth) — the value is already YoY.
+
+    Returns:
+        A quarter-indexed YoY % Series, or empty on failure.
+    """
+    url = (_OECD_PRICES + "NZL.Q......"
+           "?startPeriod=2012-Q1&dimensionAtObservation=AllDimensions")
+    headers = {"Accept": "application/vnd.sdmx.data+json", "User-Agent": "Mozilla/5.0"}
+    try:
+        payload = requests.get(url, headers=headers, timeout=_T).json()
+        dims = payload["data"]["structures"][0]["dimensions"]["observation"]
+        observations = payload["data"]["dataSets"][0]["observations"]
+    except (requests.RequestException, ValueError, KeyError, IndexError):
+        return _empty()
+
+    ids = [d["id"] for d in dims]
+    codes = [[v["id"] for v in d["values"]] for d in dims]
+    try:
+        pos = {k: ids.index(k) for k in ("MEASURE", "EXPENDITURE", "UNIT_MEASURE",
+                                         "TRANSFORMATION", "TIME_PERIOD")}
+    except ValueError:
+        return _empty()
+    want = {"MEASURE": "CPI", "EXPENDITURE": "_T",
+            "UNIT_MEASURE": "PA", "TRANSFORMATION": "GY"}
+    q_month = {"1": "01", "2": "04", "3": "07", "4": "10"}
+
+    dates, vals = [], []
+    for key, value in observations.items():
+        idx = [int(x) for x in key.split(":")]
+        if not all(codes[pos[dim]][idx[pos[dim]]] == code for dim, code in want.items()):
+            continue
+        period = codes[pos["TIME_PERIOD"]][idx[pos["TIME_PERIOD"]]]  # "2026-Q2"
+        try:
+            year, quarter = period.split("-Q")
+            dates.append(pd.Timestamp(f"{year}-{q_month[quarter]}-01"))
+            vals.append(float(value[0]))
+        except (ValueError, KeyError, TypeError):
+            continue
     return pd.Series(vals, index=pd.DatetimeIndex(dates)).sort_index()
 
 
