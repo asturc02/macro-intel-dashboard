@@ -37,6 +37,11 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 # runs on Streamlit Cloud without committing anything.
 FRED_API_KEY: str | None = os.getenv("FRED_API_KEY")
 
+# Optional free e-Stat (Japan Statistics Bureau) application ID. When present,
+# Japan CPI is pulled live from e-Stat; when absent, JP falls back to the
+# (lagging) World-Bank series. Register at https://www.e-stat.go.jp/api/.
+ESTAT_APP_ID: str | None = os.getenv("ESTAT_APP_ID")
+
 # --- FRED API ---------------------------------------------------------------
 FRED_BASE_URL: str = "https://api.stlouisfed.org/fred/series/observations"
 FRED_RELEASE_DATES_URL: str = "https://api.stlouisfed.org/fred/release/dates"
