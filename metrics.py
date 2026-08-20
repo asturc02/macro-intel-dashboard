@@ -71,6 +71,34 @@ def classify_stance(
     return config.NEUTRAL
 
 
+def classify_regime(
+    growth_momentum: float | None, inflation_momentum: float | None
+) -> str:
+    """Classify an economy into a growth/inflation macro regime.
+
+    Uses the sign of each momentum (change over ~1 year): growth accelerating or
+    not, inflation rising or not. The four quadrants are the classic model.
+
+    Args:
+        growth_momentum: Change in GDP growth over ~1 year (pp), or ``None``.
+        inflation_momentum: Change in CPI YoY over ~1 year (pp), or ``None``.
+
+    Returns:
+        One of the regime constants, or ``"n/a"`` when momentum is missing.
+    """
+    if growth_momentum is None or inflation_momentum is None:
+        return "n/a"
+    growth_up = growth_momentum >= 0.0
+    inflation_up = inflation_momentum >= 0.0
+    if growth_up and inflation_up:
+        return config.OVERHEATING
+    if growth_up and not inflation_up:
+        return config.GOLDILOCKS
+    if not growth_up and inflation_up:
+        return config.STAGFLATION
+    return config.CONTRACTION
+
+
 def carry_vs_base(
     policy_rate: float | None, base_policy_rate: float | None
 ) -> float | None:

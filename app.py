@@ -24,7 +24,7 @@ import fx
 import metrics
 import utils
 
-BUILD_MARKER = "build: macro-intel v9 (calendar + wide table)"
+BUILD_MARKER = "build: macro-intel v10 (regime matrix)"
 
 st.set_page_config(
     page_title="Macro Intelligence Dashboard",
@@ -649,6 +649,91 @@ def module_carry(snap: pd.DataFrame, api_key: str) -> None:
             st.plotly_chart(_style_fig(fig, 380), use_container_width=True)
 
 
+def module_regime(api_key: str) -> None:
+    """Render the Macro Regime Matrix (growth × inflation quadrant model).
+
+    Args:
+        api_key: Resolved FRED key.
+    """
+    st.subheader("Macro Regime Matrix")
+    st.caption(
+        "Each economy is placed by **growth momentum** (x) and **inflation "
+        "momentum** (y) — the change over the last ~1 year. Right = growth "
+        "accelerating, up = inflation rising. The four quadrants are the classic "
+        "growth/inflation regimes that drive cross-asset positioning."
+    )
+
+    pts: list[dict] = []
+    for c in config.COUNTRIES:
+        growth = (fred.change_over(get_series(c.gdp_qoq, api_key, None), 12)
+                  if c.gdp_qoq else None)
+        infl = fred.change_over(metric_series(c, "cpi_yoy", api_key), 12)
+        if growth is None or infl is None:
+            continue
+        pts.append({
+            "Economy": c.name, "CCY": c.currency,
+            "Regime": metrics.classify_regime(growth, infl),
+            "GDP momentum": round(growth, 2), "CPI momentum": round(infl, 2),
+        })
+    if not pts:
+        st.info("Not enough free GDP/CPI history to classify regimes yet.")
+        return
+    df = pd.DataFrame(pts)
+
+    order = [config.GOLDILOCKS, config.OVERHEATING, config.STAGFLATION,
+             config.CONTRACTION]
+    labels = {config.GOLDILOCKS: "🟢 Goldilocks", config.OVERHEATING: "🟠 Overheating",
+              config.STAGFLATION: "🔴 Stagflation", config.CONTRACTION: "🔵 Contraction"}
+    for col, reg in zip(st.columns(4), order):
+        col.metric(labels[reg], int((df["Regime"] == reg).sum()))
+
+    xr = max(0.5, df["GDP momentum"].abs().max() * 1.4)
+    yr = max(0.5, df["CPI momentum"].abs().max() * 1.4)
+    fig = go.Figure()
+    for reg in order:
+        sub = df[df["Regime"] == reg]
+        if sub.empty:
+            continue
+        fig.add_trace(go.Scatter(
+            x=sub["GDP momentum"], y=sub["CPI momentum"], mode="markers+text",
+            text=sub["CCY"], textposition="top center", name=reg,
+            marker=dict(size=15, color=config.REGIME_COLORS[reg],
+                        line=dict(width=1, color=config.COLOR_BG)),
+        ))
+    fig.add_hline(y=0, line_color=config.COLOR_NEUTRAL, line_width=1)
+    fig.add_vline(x=0, line_color=config.COLOR_NEUTRAL, line_width=1)
+    corners = [
+        (xr * 0.72, yr * 0.88, "OVERHEATING", config.OVERHEATING),
+        (-xr * 0.72, yr * 0.88, "STAGFLATION", config.STAGFLATION),
+        (xr * 0.72, -yr * 0.88, "GOLDILOCKS", config.GOLDILOCKS),
+        (-xr * 0.72, -yr * 0.88, "CONTRACTION", config.CONTRACTION),
+    ]
+    for x, y, txt, reg in corners:
+        fig.add_annotation(x=x, y=y, text=txt, showarrow=False, opacity=0.55,
+                           font=dict(color=config.REGIME_COLORS[reg], size=12))
+    fig.update_layout(
+        title="Growth–Inflation regime map",
+        xaxis_title="←  GDP growth momentum (pp)  →",
+        yaxis_title="←  CPI momentum (pp)  →",
+    )
+    fig.update_xaxes(range=[-xr, xr])
+    fig.update_yaxes(range=[-yr, yr])
+    st.plotly_chart(_style_fig(fig, 500), use_container_width=True)
+
+    st.dataframe(
+        df.sort_values("Regime"), use_container_width=True, hide_index=True,
+        column_config={
+            "GDP momentum": st.column_config.NumberColumn("GDP momentum", format="%+.2f"),
+            "CPI momentum": st.column_config.NumberColumn("CPI momentum", format="%+.2f"),
+        },
+    )
+    st.caption(
+        "Momentum = latest value minus the value ~12 months earlier (GDP QoQ "
+        "growth; CPI YoY). Economies without free GDP data (e.g. Argentina) are "
+        "omitted. Not investment advice."
+    )
+
+
 def module_curves(api_key: str) -> None:
     """Render the Yield Curve module (US curve, inversion, cross-country 10Y).
 
@@ -1132,21 +1217,23 @@ def main() -> None:
         warm_cache(api_key)          # parallel fan-out; fills the shared cache
         snap = build_snapshot(api_key)
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
-        ["Carry & Divergence", "Yield Curves", "Time-Series",
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
+        ["Carry & Divergence", "Regime Matrix", "Yield Curves", "Time-Series",
          "Leading Indicators", "Calendar", "Data Health"]
     )
     with tab1:
         module_carry(snap, api_key)
     with tab2:
-        module_curves(api_key)
+        module_regime(api_key)
     with tab3:
-        module_timeseries(api_key)
+        module_curves(api_key)
     with tab4:
-        module_leading(api_key)
+        module_timeseries(api_key)
     with tab5:
-        module_calendar(api_key)
+        module_leading(api_key)
     with tab6:
+        module_calendar(api_key)
+    with tab7:
         module_health(api_key, snap)
 
     render_footer()

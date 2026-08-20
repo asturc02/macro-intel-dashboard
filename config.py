@@ -73,6 +73,20 @@ HAWK: str = "Hawk"
 NEUTRAL: str = "Neutral"
 DOVE: str = "Dove"
 
+# --- Macro regime quadrant (growth momentum x inflation momentum) -----------
+# Momentum = change over ~1 year: right = growth accelerating, up = inflation
+# rising. The four regimes follow the classic growth/inflation quadrant model.
+GOLDILOCKS: str = "Goldilocks"    # growth up, inflation down/stable
+OVERHEATING: str = "Overheating"  # growth up, inflation up
+STAGFLATION: str = "Stagflation"  # growth down, inflation up
+CONTRACTION: str = "Contraction"  # growth down, inflation down
+REGIME_COLORS: dict[str, str] = {
+    GOLDILOCKS: "#10B981",   # emerald — benign
+    OVERHEATING: "#F59E0B",  # amber — hot
+    STAGFLATION: "#EF4444",  # rose — worst
+    CONTRACTION: "#60A5FA",  # blue — cooling / reflation
+}
+
 # --- US Treasury par curve (daily, very reliable) ---------------------------
 # Maturity label -> FRED series ID. Used by the Yield Curve module for the deep,
 # guaranteed-solid US curve and the 10Y-2Y inversion signal.
