@@ -2,8 +2,9 @@
 
 > A pre-open **macro cockpit** for G10 + key emerging markets: monetary-policy
 > divergence, real rates, carry-vs-USD, a volatility-adjusted carry ranking, the
-> US yield curve with its **10Y-2Y inversion** signal, and cross-country rates —
-> all from **free** data (FRED + ECB), on an interactive terminal-style dashboard.
+> US yield curve with its **10Y-2Y inversion** signal, US **leading indicators**,
+> a free **economic calendar**, and a **click-through country deep-dive** — all
+> from **free** data (FRED + ECB), on an iOS-styled dark dashboard.
 
 ### 🔗 Live demo → **_deploy URL here_**
 
@@ -14,21 +15,21 @@
 
 ---
 
-## ✨ What it does
+## ✨ The six modules
 
-- **Carry & Monetary-Divergence Matrix** — a sortable table of every economy's
-  policy rate, CPI YoY, **real rate** (policy − CPI), 10Y yield, **carry vs USD**,
-  10Y differential vs the US, unemployment, realized FX volatility, and a
-  **Carry/Vol** ("implied Sharpe") ranking. Each central bank is auto-classified
-  **🦅 Hawk / ➖ Neutral / 🕊️ Dove** by a transparent, rule-based signal.
-- **Yield-Curve Visualizer** — the US Treasury par curve (now vs 6 & 12 months
-  ago), the **10Y-2Y spread** with its inversion/recession shading, a
-  cross-country 10Y bar, and a selectable multi-country 10Y history overlay.
-- **Time-Series Explorer** — overlay any metric (policy rate, CPI YoY,
-  unemployment, 10Y) across multiple economies over 1Y / 2Y / 5Y / Max, with an
-  optional **dual-axis** second metric (e.g. US CPI vs Fed Funds).
-- **Data Health** — a live panel showing exactly which FRED series resolved, so
-  data coverage is transparent instead of silently faked.
+| Tab | What it does |
+|-----|--------------|
+| **🎯 Carry & Divergence** | Sortable matrix of every economy's policy rate, CPI YoY, **real rate**, **GDP** (annualized), 10Y yield, **carry vs USD**, 10Y differential, unemployment, realized FX vol, and a **Carry/Vol** ("implied Sharpe") ranking. Each central bank is auto-classified **🦅 Hawk / ➖ Neutral / 🕊️ Dove**. **Click any row** to drill into that country. |
+| **📉 Yield Curves** | US Treasury par curve (now vs 6 & 12 months ago), the **10Y-2Y spread** with inversion shading, a cross-country 10Y bar, and a selectable multi-country 10Y overlay with a color-palette picker. |
+| **📈 Time-Series** | Overlay any metric (policy rate, CPI, unemployment, 10Y) across economies over 1Y / 2Y / 5Y / Max, with an optional **dual-axis** second metric. |
+| **📊 Leading Indicators** | US directional gauges: initial & continued **jobless claims**, **net payrolls**, plus **core PCE / PCE / PPI / CPI** YoY with a 2%-target overlay (the Fed prioritizes core PCE). |
+| **🗓️ Calendar** | Upcoming US release dates (NFP, CPI, PCE, GDP, PPI, jobless claims) from FRED's schedule, with **Add-to-Google-Calendar** links and a **Download .ics**. |
+| **🩺 Data Health** | Live panel showing exactly which FRED series resolved and their vintage — transparency by design. |
+
+### Country deep-dive
+Clicking a row in the Carry matrix opens a **TradingEconomics-style** detail view:
+a flagged header, current-value tiles, and a 2×2 grid of history charts (policy
+rate, CPI, unemployment, 10Y) over a per-country window.
 
 ---
 
@@ -36,16 +37,16 @@
 
 ```
             ┌──────────────┐
-            │   app.py     │  Streamlit UI only (layout, CSS, Plotly, tabs)
+            │   app.py     │  Streamlit UI only (layout, CSS, Plotly, 6 tabs)
             └──────┬───────┘
                    │ calls
       ┌────────────┼───────────────┬───────────────┐
       ▼            ▼               ▼               ▼
  ┌─────────┐ ┌──────────┐  ┌────────────┐  ┌──────────┐
  │ fred.py │ │  fx.py   │  │ metrics.py │  │ utils.py │
- │ FRED    │ │ ECB/     │  │ real rate, │  │ format / │
- │ macro   │ │Frankfurter│ │ stance,    │  │ colors / │
- │ series  │ │ FX vol   │  │ carry,     │  │ windows  │
+ │ series, │ │ ECB/     │  │ real rate, │  │ format / │
+ │ release │ │Frankfurter│ │ stance,    │  │ colors / │
+ │ dates   │ │ FX vol   │  │ carry,     │  │ windows  │
  └────┬────┘ └────┬─────┘  │ Sharpe     │  └────┬─────┘
       │           │        └──────┬─────┘       │
       └───────────┴───────────────┴─────────────┘
@@ -54,8 +55,9 @@
 ```
 
 **Separation of concerns:** UI lives only in `app.py`; data access in `fred.py`
-/ `fx.py`; the quant logic (real rates, stance, carry, Sharpe) in `metrics.py`.
-Every network failure or missing series degrades gracefully to `n/a`.
+/ `fx.py`; quant logic (real rates, stance, carry, Sharpe) in `metrics.py`.
+Every network failure or missing series degrades gracefully to `n/a`. Cold-start
+fetches are **fanned out across a thread pool** for a fast first load.
 
 ---
 
@@ -63,43 +65,34 @@ Every network failure or missing series degrades gracefully to `n/a`.
 
 | Data | Source |
 |------|--------|
-| Policy rates, CPI YoY, unemployment, 10Y yields (G10 + EM) | **FRED** (St. Louis Fed / OECD MEI) |
+| Policy rates, CPI, unemployment, 10Y yields, GDP (G10 + EM) | **FRED** (St. Louis Fed / OECD) |
 | US Treasury par curve, 10Y-2Y & 10Y-3M spreads | **FRED** (daily) |
+| US leading indicators (claims, payrolls, PCE, PPI) | **FRED** |
+| Economic-calendar release dates | **FRED** release schedule |
 | FX rates & realized volatility | **Frankfurter** (ECB reference rates, no key) |
 
-> International coverage is intentionally **broad but shallow**: where a clean
-> free series doesn't exist (e.g. Argentine curves, some EM policy rates), the
-> Data Health panel flags it as `n/a` rather than inventing a number.
+> International coverage is intentionally **broad but shallow**. Because FRED's
+> OECD-sourced series froze several pre-computed rates/CPI (~2024–25), policy
+> rates for non-US/EA economies use money-market proxies and some CPI prints lag
+> ~1yr; Brazil/Argentina policy & curves have no clean free series. The **Data
+> Health** tab flags every gap and vintage rather than inventing numbers.
 
 ---
 
 ## 🚀 Setup
 
 ```bash
-# 1. Clone
 git clone https://github.com/<your-username>/macro-intel-dashboard.git
 cd macro-intel-dashboard
-
-# 2. Create and activate a virtual environment
 python -m venv .venv
-.venv\Scripts\activate        # Windows
-# source .venv/bin/activate   # macOS / Linux
-
-# 3. Install dependencies
+.venv\Scripts\activate         # Windows  (source .venv/bin/activate on macOS/Linux)
 pip install -r requirements.txt
-
-# 4. Configure your FRED key (free)
-cp .env.example .env          # Windows: copy .env.example .env
-#   then edit .env and set FRED_API_KEY=...   (get one at the link below)
+cp .env.example .env           # then set FRED_API_KEY=...
 ```
 
 Get a **free FRED API key** in ~30 seconds at
 [fredaccount.stlouisfed.org/apikeys](https://fredaccount.stlouisfed.org/apikeys).
-You can also paste it directly into the app's sidebar instead of using `.env`.
-
----
-
-## ▶️ Run locally
+You can also paste it into the app's **☰ Menu** instead of using `.env`.
 
 ```bash
 streamlit run app.py
@@ -112,23 +105,23 @@ streamlit run app.py
 1. Push this repo to GitHub.
 2. On [share.streamlit.io](https://share.streamlit.io), create a new app pointing
    at `app.py`.
-3. Add `FRED_API_KEY` under **App settings → Secrets**. No code changes required.
+3. Under **Advanced settings → Secrets**, add `FRED_API_KEY = "..."`.
+4. Deploy — no code changes required.
 
 ---
 
 ## 🛠️ Skills demonstrated
 
-- **Quantitative macro** — real rates, monetary-divergence, carry vs base
-  currency, volatility-adjusted carry, curve inversion — the analytics a macro
-  desk actually watches pre-open.
-- **API integration** — resilient REST clients for FRED and Frankfurter with
-  defensive parsing, timeouts, and graceful degradation.
-- **Data engineering** — pandas time-series handling, YoY transforms, realized-
-  volatility estimation, cached fan-out over ~40 series.
-- **Data visualization** — interactive Plotly on a custom dark theme; sortable,
-  formatted tables via Streamlit `column_config`.
+- **Quantitative macro** — real rates, monetary divergence, carry vs base
+  currency, volatility-adjusted carry, curve inversion, leading indicators.
+- **API integration** — resilient REST clients for FRED (series, release dates)
+  and Frankfurter, with defensive parsing and graceful degradation.
+- **Data engineering** — pandas time-series, YoY transforms, realized-vol
+  estimation, cached parallel fan-out over ~60 series.
+- **Data visualization & UX** — interactive Plotly on a custom iOS-style theme,
+  a selectable country drill-down, and a downloadable `.ics` calendar.
 - **Python architecture** — clean module separation, type hints, Google-style
-  docstrings, environment-based configuration, and BYO-key security.
+  docstrings, environment-based config, and BYO-key security.
 
 ---
 
