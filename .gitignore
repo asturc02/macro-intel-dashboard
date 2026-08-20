@@ -22,3 +22,6 @@ data/*.json
 .vscode/
 .idea/
 .DS_Store
+
+# Local testing screenshots (not part of the portfolio repo)
+Testing/
