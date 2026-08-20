@@ -7,6 +7,8 @@ unit-tested by construction (deterministic given inputs).
 
 from __future__ import annotations
 
+import pandas as pd
+
 import config
 
 
@@ -129,6 +131,85 @@ def yield_diff_vs_base(y10: float | None, base_y10: float | None) -> float | Non
     if y10 is None or base_y10 is None:
         return None
     return round(y10 - base_y10, 2)
+
+
+def periods_per_year(index: pd.DatetimeIndex) -> int:
+    """Estimate observations per year from a date index's median spacing.
+
+    Lets the same z-score code work on daily FRED spreads (~252/yr) and monthly
+    international yields (12/yr) without hardcoding a frequency.
+
+    Args:
+        index: A pandas ``DatetimeIndex``.
+
+    Returns:
+        Estimated number of observations per calendar year (>= 1); defaults to
+        12 when the index is too short to infer a spacing.
+    """
+    if index is None or len(index) < 3:
+        return 12
+    step_days = float(pd.Series(index).diff().dropna().dt.days.median())
+    if not step_days or step_days <= 0:
+        return 12
+    # Snap to the nearest canonical cadence. FRED daily series skip weekends and
+    # holidays (median gap ~1 business day), so calendar-day math would overstate
+    # them; ~252 trading days/year is the right annualization.
+    if step_days <= 4:      # daily / business-day
+        return 252
+    if step_days <= 10:     # weekly
+        return 52
+    if step_days <= 45:     # monthly
+        return 12
+    if step_days <= 135:    # quarterly
+        return 4
+    return max(1, int(round(365.25 / step_days)))
+
+
+def rolling_zscore(
+    series: pd.Series, window: int, min_periods: int | None = None
+) -> pd.Series:
+    """Rolling z-score of a series: ``(x − rolling_mean) / rolling_std``.
+
+    Measures how many standard deviations the current level sits from its own
+    recent history — a transparent richness/cheapness gauge for a spread. Pure
+    and deterministic given inputs.
+
+    Args:
+        series: A date-indexed numeric series.
+        window: Rolling window length, in observations.
+        min_periods: Minimum observations before a z-score is emitted; defaults
+            to one third of ``window`` (at least 2).
+
+    Returns:
+        A z-score series aligned to ``series`` (leading values are ``NaN`` until
+        ``min_periods`` is reached). Empty when the input is empty.
+    """
+    if series is None or series.empty:
+        return pd.Series(dtype="float64")
+    mp = min_periods if min_periods is not None else max(2, window // 3)
+    mean = series.rolling(window, min_periods=mp).mean()
+    std = series.rolling(window, min_periods=mp).std()
+    z = (series - mean) / std.replace(0.0, pd.NA)
+    return z.astype("float64")
+
+
+def zscore_label(z: float | None) -> str:
+    """Human-readable band for a z-score (how stretched vs recent history).
+
+    Args:
+        z: A z-score, or ``None``.
+
+    Returns:
+        A short labelled string with a status emoji.
+    """
+    if z is None or pd.isna(z):
+        return "➖ n/a"
+    az = abs(z)
+    if az >= 2.0:
+        return ("🔴 Extremely high" if z > 0 else "🔵 Extremely low") + " vs 3y"
+    if az >= 1.0:
+        return ("🟠 High" if z > 0 else "🟠 Low") + " vs 3y"
+    return "⚪ Near normal"
 
 
 def implied_sharpe(

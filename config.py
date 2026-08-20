@@ -110,6 +110,31 @@ US_CURVE_ORDER: tuple[str, ...] = ("3M", "1Y", "2Y", "5Y", "10Y", "20Y", "30Y")
 SPREAD_10Y_2Y: str = "T10Y2Y"
 SPREAD_10Y_3M: str = "T10Y3M"
 
+# --- Z-score spread monitor -------------------------------------------------
+# Key macro spreads whose richness/cheapness we gauge with a rolling z-score:
+# how many standard deviations the current level sits from its own recent
+# history. Each entry: (label, kind, ref, note).
+#   kind "fred": ``ref`` is a ready-made FRED spread series ID (daily).
+#   kind "diff": ``ref`` is a (code_a, code_b) pair -> 10Y[a] − 10Y[b] (monthly).
+# Curve-slope spreads use daily FRED series; cross-country 10Y gaps are built
+# from the monthly international yields already in the registry. The z-score
+# code infers each series' frequency, so the 3-year window is comparable.
+ZSCORE_WINDOW_YEARS: int = 3
+SPREADS: tuple[tuple[str, str, object, str], ...] = (
+    ("US 10Y − 2Y (curve slope)", "fred", "T10Y2Y",
+     "Term-structure slope. Inversion (negative) has preceded US recessions."),
+    ("US 10Y − 3M (curve slope)", "fred", "T10Y3M",
+     "Near-term slope — the Fed's preferred recession gauge."),
+    ("US 10Y − Bund 10Y", "diff", ("US", "EA"),
+     "US–Germany 10Y gap — a core driver of EUR/USD."),
+    ("US 10Y − JGB 10Y", "diff", ("US", "JP"),
+     "US–Japan 10Y gap — drives USD/JPY and yen-funded carry."),
+    ("US 10Y − Gilt 10Y", "diff", ("US", "GB"),
+     "US–UK 10Y gap — a GBP/USD rate driver."),
+    ("AU 10Y − JGB 10Y", "diff", ("AU", "JP"),
+     "The classic AUD/JPY carry-trade rate spread."),
+)
+
 
 class Country:
     """Static description of one economy and its FRED series IDs.

@@ -26,7 +26,7 @@ import metrics
 import national
 import utils
 
-BUILD_MARKER = "build: macro-intel v15 (NZ OECD — all CPI current)"
+BUILD_MARKER = "build: macro-intel v16 (Module B — spread z-scores)"
 
 st.set_page_config(
     page_title="Macro Intelligence Dashboard",
@@ -923,6 +923,182 @@ def module_curves(api_key: str) -> None:
         st.plotly_chart(_style_fig(fig, 380), use_container_width=True)
 
 
+def _spread_series(kind: str, ref: object, api_key: str) -> pd.Series:
+    """Resolve one macro spread to a date-indexed series.
+
+    Args:
+        kind: ``"fred"`` (ready-made spread series ID) or ``"diff"`` (a pair of
+            country codes whose 10Y yields are differenced).
+        ref: A FRED series ID (``kind="fred"``) or a ``(code_a, code_b)`` tuple
+            (``kind="diff"``).
+        api_key: Resolved FRED key.
+
+    Returns:
+        The spread series in percentage points (possibly empty).
+    """
+    if kind == "fred":
+        return get_series(str(ref), api_key, None)
+    code_a, code_b = ref  # type: ignore[misc]
+    a = get_series(config.COUNTRY_BY_CODE[code_a].y10, api_key, None)
+    b = get_series(config.COUNTRY_BY_CODE[code_b].y10, api_key, None)
+    if a.empty or b.empty:
+        return pd.Series(dtype="float64")
+    # Align on the union of dates; monthly international yields share month-ends.
+    joined = pd.concat([a, b], axis=1).dropna()
+    if joined.empty:
+        return pd.Series(dtype="float64")
+    return (joined.iloc[:, 0] - joined.iloc[:, 1]).astype("float64")
+
+
+def module_zscore(api_key: str) -> None:
+    """Render the Spread Z-Score monitor (Module B).
+
+    For each key macro spread, computes a rolling 3-year z-score — how many
+    standard deviations the current level sits from its own recent history — so
+    a stretched curve slope or an unusually wide cross-country yield gap stands
+    out at a glance, independent of each spread's natural scale.
+
+    Args:
+        api_key: Resolved FRED key.
+    """
+    st.subheader("Spread Z-Scores — how stretched vs their own history")
+    st.caption(
+        "Each spread's **z-score** = (current level − 3-year rolling mean) ÷ "
+        "3-year rolling standard deviation. It answers *“how unusual is this "
+        "right now?”* on a common scale: **> +2 / < −2** is a ~2σ extreme, near "
+        "**0** is business-as-usual. Normalizing this way lets a steep curve and "
+        "a wide US–JGB gap be compared side by side."
+    )
+
+    win_years = config.ZSCORE_WINDOW_YEARS
+    rows: list[dict] = []
+    hist: dict[str, tuple[pd.Series, pd.Series]] = {}  # label -> (level, zscore)
+    for label, kind, ref, note in config.SPREADS:
+        s = _spread_series(kind, ref, api_key)
+        if s.empty:
+            rows.append({"Spread": label, "Current": None, "3y avg": None,
+                         "Z-score": None, "%ile (3y)": None, "Signal": "➖ n/a",
+                         "note": note})
+            continue
+        ppy = metrics.periods_per_year(s.index)
+        window = max(4, win_years * ppy)
+        z = metrics.rolling_zscore(s, window)
+        recent = s.tail(window)
+        z_now = float(z.iloc[-1]) if not z.dropna().empty else None
+        pct = (float((recent < s.iloc[-1]).mean()) * 100.0
+               if len(recent) > 1 else None)
+        rows.append({
+            "Spread": label,
+            "Current": round(float(s.iloc[-1]), 2),
+            "3y avg": round(float(recent.mean()), 2),
+            "Z-score": round(z_now, 2) if z_now is not None else None,
+            "%ile (3y)": round(pct, 0) if pct is not None else None,
+            "Signal": metrics.zscore_label(z_now),
+            "note": note,
+        })
+        hist[label] = (s, z)
+
+    df = pd.DataFrame(rows)
+
+    # --- Headline table -----------------------------------------------------
+    table_cols = ["Spread", "Current", "3y avg", "Z-score", "%ile (3y)", "Signal"]
+    st.dataframe(
+        df[table_cols], use_container_width=True, hide_index=True,
+        column_config={
+            "Current": st.column_config.NumberColumn("Current (pp)", format="%.2f"),
+            "3y avg": st.column_config.NumberColumn("3y avg (pp)", format="%.2f"),
+            "Z-score": st.column_config.NumberColumn(
+                "Z-score", format="%+.2f",
+                help="Standard deviations from the 3-year mean"),
+            "%ile (3y)": st.column_config.NumberColumn(
+                "%ile (3y)", format="%d%%",
+                help="Where the current level ranks within its 3-year range"),
+        },
+    )
+
+    # --- Z-score bar (diverging) -------------------------------------------
+    zdf = df.dropna(subset=["Z-score"]).sort_values("Z-score")
+    if zdf.empty:
+        st.info("No spread series resolved yet — check the FRED key / Data Health.")
+        return
+    colors = [
+        config.COLOR_HAWK if abs(v) >= 2 else
+        (config.COLOR_ACCENT if abs(v) >= 1 else config.COLOR_NEUTRAL)
+        for v in zdf["Z-score"]
+    ]
+    fig = go.Figure(go.Bar(
+        x=zdf["Z-score"], y=zdf["Spread"], orientation="h",
+        marker_color=colors,
+        text=[f"{v:+.2f}σ" for v in zdf["Z-score"]], textposition="outside",
+    ))
+    for xv, dash in ((0, "solid"), (1, "dot"), (-1, "dot"), (2, "dash"), (-2, "dash")):
+        fig.add_vline(x=xv, line_width=1, line_dash=dash,
+                      line_color=config.COLOR_NEUTRAL if xv == 0 else config.COLOR_GRID)
+    fig.update_layout(title=f"Current z-score vs {win_years}-year history",
+                      xaxis_title="Z-score (σ from 3y mean)", yaxis_title="")
+    fig.update_traces(cliponaxis=False)
+    zmax = max(2.4, float(zdf["Z-score"].abs().max()) + 0.6)
+    fig.update_xaxes(range=[-zmax, zmax])
+    st.plotly_chart(_style_fig(fig, 360), use_container_width=True)
+
+    # --- Per-spread detail: level with ±1σ/±2σ bands + z-score history ------
+    st.markdown("###### Inspect one spread")
+    resolved = [r["Spread"] for r in rows if r["Signal"] != "➖ n/a"]
+    pick = st.selectbox("Spread", resolved, key="zscore_pick")
+    note = next((r["note"] for r in rows if r["Spread"] == pick), "")
+    if note:
+        st.caption(f"ℹ️ {note}")
+    s, z = hist[pick]
+    ppy = metrics.periods_per_year(s.index)
+    window = max(4, win_years * ppy)
+    mp = max(2, window // 3)
+    mean = s.rolling(window, min_periods=mp).mean()
+    std = s.rolling(window, min_periods=mp).std()
+
+    left, right = st.columns(2)
+    with left:
+        fig = go.Figure()
+        # ±2σ then ±1σ bands (drawn back-to-front so the tighter band overlays).
+        for k, alpha in ((2, 0.06), (1, 0.12)):
+            fig.add_trace(go.Scatter(
+                x=s.index, y=(mean + k * std).values, line=dict(width=0),
+                showlegend=False, hoverinfo="skip"))
+            fig.add_trace(go.Scatter(
+                x=s.index, y=(mean - k * std).values, line=dict(width=0),
+                fill="tonexty", fillcolor=f"rgba(31,133,121,{alpha})",
+                name=f"±{k}σ", hoverinfo="skip"))
+        fig.add_trace(go.Scatter(
+            x=mean.index, y=mean.values, name="3y mean",
+            line=dict(color=config.COLOR_NEUTRAL, dash="dash", width=1)))
+        fig.add_trace(go.Scatter(
+            x=s.index, y=s.values, name="Spread",
+            line=dict(color=config.COLOR_ACCENT, width=2)))
+        fig.update_layout(title=f"{pick} — level with 3y ±1σ/±2σ bands",
+                          xaxis_title="Date", yaxis_title="Spread (pp)")
+        st.plotly_chart(_style_fig(fig, 340), use_container_width=True)
+    with right:
+        zz = z.dropna()
+        fig = go.Figure(go.Scatter(
+            x=zz.index, y=zz.values, name="Z-score",
+            line=dict(color=config.COLOR_ACCENT, width=2),
+            fill="tozeroy", fillcolor="rgba(31,133,121,0.10)"))
+        for yv, dash in ((2, "dash"), (1, "dot"), (-1, "dot"), (-2, "dash")):
+            fig.add_hline(y=yv, line_width=1, line_dash=dash,
+                          line_color=config.COLOR_GRID)
+        fig.add_hline(y=0, line_width=1, line_color=config.COLOR_NEUTRAL)
+        fig.update_layout(title=f"{pick} — rolling z-score",
+                          xaxis_title="Date", yaxis_title="Z-score (σ)")
+        st.plotly_chart(_style_fig(fig, 340), use_container_width=True)
+
+    st.caption(
+        "Z-score uses a rolling 3-year window (frequency inferred per series: "
+        "daily for the curve-slope spreads, monthly for cross-country 10Y gaps). "
+        "A high positive z means the spread is unusually wide/steep vs its own "
+        "recent norm; deeply negative means unusually compressed/inverted. "
+        "Descriptive, not a trade signal."
+    )
+
+
 def module_timeseries(api_key: str) -> None:
     """Render the multi-country / multi-metric time-series explorer.
 
@@ -1295,9 +1471,9 @@ def main() -> None:
         warm_cache(api_key)          # parallel fan-out; fills the shared cache
         snap = build_snapshot(api_key)
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
-        ["Carry & Divergence", "Regime Matrix", "Yield Curves", "Time-Series",
-         "Leading Indicators", "Calendar", "Data Health"]
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
+        ["Carry & Divergence", "Regime Matrix", "Yield Curves", "Spread Z-Scores",
+         "Time-Series", "Leading Indicators", "Calendar", "Data Health"]
     )
     with tab1:
         module_carry(snap, api_key)
@@ -1306,12 +1482,14 @@ def main() -> None:
     with tab3:
         module_curves(api_key)
     with tab4:
-        module_timeseries(api_key)
+        module_zscore(api_key)
     with tab5:
-        module_leading(api_key)
+        module_timeseries(api_key)
     with tab6:
-        module_calendar(api_key)
+        module_leading(api_key)
     with tab7:
+        module_calendar(api_key)
+    with tab8:
         module_health(api_key, snap)
 
     render_footer()
