@@ -11,6 +11,8 @@ Sources
   (servicodados) for IPCA inflation (YoY) and PNAD unemployment.
 * **Canada**  — Statistics Canada (WDS) for the CPI; YoY derived from the index.
 * **Norway**  — Statistics Norway (SSB PxWebApi) for the CPI; YoY from the index.
+* **UK**      — ONS website time-series ``/data`` endpoint (CPI annual rate).
+* **Argentina** — datos.gob.ar Series API (INDEC national IPC); YoY from index.
 """
 
 from __future__ import annotations
@@ -21,7 +23,9 @@ import requests
 import config
 
 _HEADERS: dict[str, str] = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-_T = config.REQUEST_TIMEOUT_SECONDS
+# National feeds can return large payloads (ONS ~120KB, BCB ~120KB); give them a
+# longer timeout so they survive the parallel cold-start fan-out.
+_T = max(35, config.REQUEST_TIMEOUT_SECONDS)
 
 
 def _empty() -> pd.Series:
@@ -108,6 +112,63 @@ def ca_cpi_yoy() -> pd.Series:
             dates.append(pd.Timestamp(p["refPer"]))
             vals.append(float(p["value"]))
         except (KeyError, ValueError, TypeError):
+            continue
+    index = pd.Series(vals, index=pd.DatetimeIndex(dates)).sort_index()
+    return (index.pct_change(12) * 100.0).dropna()
+
+
+# --- United Kingdom ---------------------------------------------------------
+def gb_cpi_yoy() -> pd.Series:
+    """UK CPI annual rate (%), from the ONS website time-series ``/data`` feed.
+
+    Series D7G7 (CPI 12-month rate, all items) in dataset MM23. The value is
+    already a YoY percent, so no transform is needed. The legacy
+    ``api.ons.gov.uk`` service was decommissioned; the website's own ``/data``
+    JSON endpoint remains available.
+
+    Returns:
+        A month-indexed YoY % Series, or empty on failure.
+    """
+    url = ("https://www.ons.gov.uk/economy/inflationandpriceindices/"
+           "timeseries/d7g7/mm23/data")
+    try:
+        months = requests.get(url, headers=_HEADERS, timeout=_T).json()["months"]
+    except (requests.RequestException, ValueError, KeyError):
+        return _empty()
+    dates, vals = [], []
+    for entry in months:
+        try:  # date like "2026 JUL" -> title-case for %b parsing
+            dates.append(pd.to_datetime(entry["date"].title(), format="%Y %b"))
+            vals.append(float(entry["value"]))
+        except (KeyError, ValueError, TypeError):
+            continue
+    return pd.Series(vals, index=pd.DatetimeIndex(dates)).sort_index()
+
+
+# --- Argentina --------------------------------------------------------------
+def ar_cpi_yoy() -> pd.Series:
+    """Argentina national IPC YoY %, from the datos.gob.ar Series API (INDEC).
+
+    Fetches the national CPI index (base dic-2016) and derives YoY from it.
+
+    Returns:
+        A month-indexed YoY % Series, or empty on failure.
+    """
+    url = "https://apis.datos.gob.ar/series/api/series/"
+    try:
+        data = requests.get(
+            url, headers=_HEADERS, timeout=_T,
+            params={"ids": "148.3_INIVELNAL_DICI_M_26", "format": "json",
+                    "limit": 1000, "collapse": "month"},
+        ).json()["data"]
+    except (requests.RequestException, ValueError, KeyError):
+        return _empty()
+    dates, vals = [], []
+    for row in data:
+        try:
+            dates.append(pd.Timestamp(row[0]))
+            vals.append(float(row[1]))
+        except (IndexError, ValueError, TypeError):
             continue
     index = pd.Series(vals, index=pd.DatetimeIndex(dates)).sort_index()
     return (index.pct_change(12) * 100.0).dropna()

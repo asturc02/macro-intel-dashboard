@@ -26,7 +26,7 @@ import metrics
 import national
 import utils
 
-BUILD_MARKER = "build: macro-intel v12 (national sources: BR/CA/NO)"
+BUILD_MARKER = "build: macro-intel v13 (UK ONS + AR INDEC)"
 
 st.set_page_config(
     page_title="Macro Intelligence Dashboard",
@@ -248,6 +248,8 @@ def _nat(name: str) -> pd.Series:
         "br_unemployment": national.br_unemployment,
         "ca_cpi_yoy": national.ca_cpi_yoy,
         "no_cpi_yoy": national.no_cpi_yoy,
+        "gb_cpi_yoy": national.gb_cpi_yoy,
+        "ar_cpi_yoy": national.ar_cpi_yoy,
     }[name]()
 
 
@@ -260,6 +262,8 @@ NATIONAL_OVERRIDES: dict[tuple[str, str], object] = {
     ("BR", "unemployment"): lambda: _nat("br_unemployment"),
     ("CA", "cpi_yoy"): lambda: _nat("ca_cpi_yoy"),
     ("NO", "cpi_yoy"): lambda: _nat("no_cpi_yoy"),
+    ("GB", "cpi_yoy"): lambda: _nat("gb_cpi_yoy"),
+    ("AR", "cpi_yoy"): lambda: _nat("ar_cpi_yoy"),
 }
 # Human-readable source labels for the Data Health panel.
 SOURCE_LABEL: dict[tuple[str, str], str] = {
@@ -269,6 +273,8 @@ SOURCE_LABEL: dict[tuple[str, str], str] = {
     ("BR", "unemployment"): "IBGE PNAD",
     ("CA", "cpi_yoy"): "StatCan (v41690973)",
     ("NO", "cpi_yoy"): "SSB (03013)",
+    ("GB", "cpi_yoy"): "ONS (D7G7)",
+    ("AR", "cpi_yoy"): "INDEC (datos.gob.ar)",
 }
 
 
@@ -307,7 +313,7 @@ def warm_cache(api_key: str) -> None:
             pool.submit(get_release_dates, rid, api_key)
         pool.submit(get_au_cpi_yoy)  # ABS national CPI (Australia)
         for nat_name in ("br_selic", "br_ipca_yoy", "br_unemployment",
-                         "ca_cpi_yoy", "no_cpi_yoy"):
+                         "ca_cpi_yoy", "no_cpi_yoy", "gb_cpi_yoy", "ar_cpi_yoy"):
             pool.submit(_nat, nat_name)
 
 
@@ -467,7 +473,9 @@ def render_footer() -> None:
               <a href="https://www.bcb.gov.br/">BCB</a> &amp;
               <a href="https://www.ibge.gov.br/">IBGE</a> (BR),
               <a href="https://www.statcan.gc.ca/">StatCan</a> (CA),
-              <a href="https://www.ssb.no/en">SSB</a> (NO).<br>
+              <a href="https://www.ssb.no/en">SSB</a> (NO),
+              <a href="https://www.ons.gov.uk/">ONS</a> (UK),
+              <a href="https://datos.gob.ar/">INDEC</a> (AR).<br>
               Portfolio project for educational purposes — <b>not financial advice</b>.
             </div>
             """,
@@ -606,10 +614,10 @@ def module_carry(snap: pd.DataFrame, api_key: str) -> None:
     st.caption(
         "ℹ️ Policy rate is the actual target for US (Fed) & EA (ECB); for other "
         "economies it's a money-market proxy (3m interbank / overnight). GDP is "
-        "the latest quarter's real growth, annualized. CPI is current for US/EA/JP "
-        "plus AU/CA/NO (national sources); Brazil now uses BCB (Selic) + IBGE "
-        "(inflation, unemployment). UK/NZ/AR still lag or are n/a on free data. "
-        "See **Data Health** for the exact source & vintage of every cell."
+        "the latest quarter's real growth, annualized. CPI is now current for "
+        "US/EA plus AU/CA/NO/GB (ABS/StatCan/SSB/ONS) and AR (INDEC); Brazil adds "
+        "BCB Selic + IBGE. Only JP/NZ CPI still lag on free data. See **Data "
+        "Health** for the exact source & vintage of every cell."
     )
 
     hawks = (snap["Stance"].str.contains("Hawk")).sum()
