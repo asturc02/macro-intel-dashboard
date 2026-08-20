@@ -26,7 +26,7 @@ import metrics
 import national
 import utils
 
-BUILD_MARKER = "build: macro-intel v16 (Module B — spread z-scores)"
+BUILD_MARKER = "build: macro-intel v18 (Module A+ — carry pairs)"
 
 st.set_page_config(
     page_title="Macro Intelligence Dashboard",
@@ -233,6 +233,19 @@ def get_fx_vol(currency: str) -> float | None:
 
 
 @st.cache_data(ttl=config.CACHE_TTL_SECONDS, show_spinner=False)
+def get_cross_vol(base: str, quote: str) -> float | None:
+    """Cached annualized realized volatility of a ``base``/``quote`` cross rate."""
+    return fx.cross_vol(base, quote)
+
+
+@st.cache_data(ttl=config.CACHE_TTL_SECONDS, show_spinner=False)
+def get_cross_spot(base: str, quote: str) -> float | None:
+    """Cached latest spot for a ``base``/``quote`` cross rate (units of quote)."""
+    s = fx.fetch_cross(base, quote, days=10)
+    return float(s.iloc[-1]) if not s.empty else None
+
+
+@st.cache_data(ttl=config.CACHE_TTL_SECONDS, show_spinner=False)
 def get_au_cpi_yoy() -> pd.Series:
     """Cached Australian CPI YoY from the ABS national feed (no key needed)."""
     return abs_au.fetch_cpi_yoy()
@@ -317,6 +330,11 @@ def warm_cache(api_key: str) -> None:
             pool.submit(get_series, sid, api_key, None)
         for ccy in currencies:
             pool.submit(get_fx_vol, ccy)
+        for long_c, short_c in config.CARRY_PAIRS:  # cross-pair vol & spot
+            base = config.COUNTRY_BY_CODE[long_c].currency
+            quote = config.COUNTRY_BY_CODE[short_c].currency
+            pool.submit(get_cross_vol, base, quote)
+            pool.submit(get_cross_spot, base, quote)
         for _name, rid, _tier in config.KEY_RELEASES:
             pool.submit(get_release_dates, rid, api_key)
         pool.submit(get_au_cpi_yoy)  # ABS national CPI (Australia)
@@ -727,6 +745,93 @@ def module_carry(snap: pd.DataFrame, api_key: str) -> None:
             fig.add_hline(y=0, line_color=config.COLOR_NEUTRAL, line_width=1)
             st.plotly_chart(_style_fig(fig, 380), use_container_width=True)
 
+    module_carry_pairs(snap, api_key)
+
+
+def module_carry_pairs(snap: pd.DataFrame, api_key: str) -> None:
+    """Render the cross-currency carry-pair monitor (Module A+).
+
+    Extends the vs-USD carry view to classic FX *pairs* (AUD/JPY, BRL/JPY, …):
+    carry is the policy-rate gap between the two legs, risk is the annualized
+    realized volatility of the actual cross rate, and Carry/Vol ranks the pairs
+    by reward-per-unit-of-FX-risk (a transparent "implied Sharpe").
+
+    Args:
+        snap: The cross-country snapshot (source of each leg's policy rate).
+        api_key: Resolved FRED key (unused directly; kept for signature parity).
+    """
+    st.divider()
+    st.markdown("###### Carry pairs — cross-currency carry & risk-adjusted ranking")
+    st.caption(
+        "A carry *pair* goes **long** the base leg and **short** (borrows) the "
+        "quote leg. **Carry** = policy[long] − policy[short]; **FX vol** is the "
+        "annualized realized vol of the real cross rate; **Carry/Vol** ranks the "
+        "pairs by reward per unit of FX risk. Pairs use their conventional quote, "
+        "so a negative carry (the funding leg out-yields the base) is shown "
+        "honestly, not flipped."
+    )
+
+    def _policy(code: str) -> float | None:
+        v = snap.loc[code, "Policy %"] if code in snap.index else None
+        return None if v is None or pd.isna(v) else float(v)
+
+    rows: list[dict] = []
+    for long_c, short_c in config.CARRY_PAIRS:
+        cl = config.COUNTRY_BY_CODE[long_c]
+        cs = config.COUNTRY_BY_CODE[short_c]
+        carry = metrics.carry_vs_base(_policy(long_c), _policy(short_c))
+        vol = get_cross_vol(cl.currency, cs.currency)
+        spot = get_cross_spot(cl.currency, cs.currency)
+        rows.append({
+            "Pair": f"{cl.currency}/{cs.currency}",
+            "Long": cl.currency, "Short": cs.currency,
+            "Carry (pp)": carry,
+            "FX vol %": round(vol, 1) if vol is not None else None,
+            "Carry/Vol": metrics.implied_sharpe(carry, vol),
+            "Spot": round(spot, 2) if spot is not None else None,
+        })
+    df = pd.DataFrame(rows)
+
+    st.dataframe(
+        df, use_container_width=True, hide_index=True,
+        column_config={
+            "Carry (pp)": st.column_config.NumberColumn("Carry (pp)", format="%+.2f"),
+            "FX vol %": st.column_config.NumberColumn("FX vol %", format="%.1f"),
+            "Carry/Vol": st.column_config.NumberColumn(
+                "Carry/Vol", format="%+.2f",
+                help="Carry ÷ annualized FX vol — risk-adjusted carry"),
+            "Spot": st.column_config.NumberColumn(
+                "Spot", format="%.2f", help="Latest cross rate (quote per 1 base)"),
+        },
+    )
+
+    ranked = df.dropna(subset=["Carry/Vol"]).sort_values("Carry/Vol")
+    if ranked.empty:
+        st.info("No carry-pair data resolved (policy rate or FX vol unavailable).")
+        return
+    colors = [config.COLOR_DOVE if v >= 0 else config.COLOR_HAWK
+              for v in ranked["Carry/Vol"]]
+    fig = go.Figure(go.Bar(
+        x=ranked["Carry/Vol"], y=ranked["Pair"], orientation="h",
+        marker_color=colors,
+        text=[f"{v:+.2f}" for v in ranked["Carry/Vol"]], textposition="outside",
+    ))
+    fig.add_vline(x=0, line_color=config.COLOR_NEUTRAL, line_width=1)
+    fig.update_layout(
+        title="Carry pairs ranked by Carry / FX-vol (implied Sharpe)",
+        xaxis_title="Carry ÷ FX vol", yaxis_title="",
+    )
+    fig.update_traces(cliponaxis=False)
+    vmin, vmax = ranked["Carry/Vol"].min(), ranked["Carry/Vol"].max()
+    fig.update_xaxes(range=[min(vmin, 0) - 0.3, max(vmax, 0) + 0.3])
+    st.plotly_chart(_style_fig(fig, 320), use_container_width=True)
+    st.caption(
+        "Policy-rate carry is a *funding* proxy, not a live forward-points carry, "
+        "and realized vol looks backward. Directional & educational — not a trade "
+        "signal. JPY-funded pairs dominate because Japan's policy rate anchors "
+        "near zero."
+    )
+
 
 def module_regime(api_key: str) -> None:
     """Render the Macro Regime Matrix (growth × inflation quadrant model).
@@ -950,6 +1055,93 @@ def _spread_series(kind: str, ref: object, api_key: str) -> pd.Series:
     return (joined.iloc[:, 0] - joined.iloc[:, 1]).astype("float64")
 
 
+def _zscore_explainer() -> None:
+    """Render the in-tab visual explainer for the Spread Z-Score section.
+
+    A self-contained "how to read this tab" panel: the z-score idea, a colored
+    ±σ scale strip, a glossary of the bond nicknames, and a guide to the table
+    columns and the three charts. Lives in an expander so it does not crowd the
+    working view.
+    """
+    with st.expander("📘  How to read this tab — tables, charts & the theory"):
+        st.markdown(
+            "**The one idea.** A *spread* is one interest rate minus another. "
+            "Different spreads live on different scales (the US curve slope moves "
+            "around ±1pp; the AU–Japan gap sits near +3pp), so a raw number can't "
+            "tell you what's *unusual*. The **z-score** rewrites every spread in "
+            "one universal unit — **standard deviations from its own 3-year "
+            "average** — so they all become comparable:"
+        )
+        st.latex(r"z=\frac{\text{today's spread}-\text{3-year average}}"
+                 r"{\text{3-year standard deviation}}")
+
+        # Colored ±σ scale strip (visual legend for the Signal column).
+        st.markdown(
+            """
+            <div style="display:flex; gap:3px; margin:0.2rem 0 0.1rem 0;
+                        font-size:0.72rem; font-weight:600; text-align:center;
+                        color:#0A0E1A;">
+              <div style="flex:1; background:#60A5FA; border-radius:8px 0 0 8px;
+                          padding:8px 4px;">≤ −2σ<br>
+                <span style="font-weight:500;">🔵 extreme low</span></div>
+              <div style="flex:1; background:#F59E0B; padding:8px 4px;">−2…−1σ<br>
+                <span style="font-weight:500;">🟠 low</span></div>
+              <div style="flex:1.6; background:#6B7488; padding:8px 4px;">−1…+1σ<br>
+                <span style="font-weight:500;">⚪ near normal</span></div>
+              <div style="flex:1; background:#F59E0B; padding:8px 4px;">+1…+2σ<br>
+                <span style="font-weight:500;">🟠 high</span></div>
+              <div style="flex:1; background:#EF4444; border-radius:0 8px 8px 0;
+                          padding:8px 4px;">≥ +2σ<br>
+                <span style="font-weight:500;">🔴 extreme high</span></div>
+            </div>
+            <div style="color:#9AA6B8; font-size:0.75rem; margin-bottom:0.4rem;">
+              ±2σ happens only ~2.5% of the time on each side — that's why it reads
+              as an "extreme". This strip is exactly what the <b>Signal</b> column
+              encodes.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        left, right = st.columns(2)
+        with left:
+            st.markdown(
+                "**Two families of spread**\n"
+                "- **Curve slope** (one country: 10Y − short rate). A *growth / "
+                "recession* signal — an inverted (negative) US curve has preceded "
+                "every US recession in ~50 years.\n"
+                "- **Cross-country 10Y gap** (country A − country B). An *FX / "
+                "carry* signal — money flows to the higher yield, lifting that "
+                "currency. **AU − JGB** is the classic AUD/JPY carry trade.\n\n"
+                "**Bond nicknames** (all just *that country's government bond*)\n"
+                "- **Treasury** = 🇺🇸 US · **Bund** = 🇩🇪 Germany/euro area\n"
+                "- **JGB** = 🇯🇵 Japan · **Gilt** = 🇬🇧 UK\n"
+                "- **3M** = 3-month bill · **2Y** = 2-year note · **10Y** = 10-year"
+            )
+        with right:
+            st.markdown(
+                "**The table**\n"
+                "- **Current** — today's spread (pp)\n"
+                "- **3y avg** — its rolling 3-year mean (the \"normal\")\n"
+                "- **Z-score** — SDs from that mean (the headline)\n"
+                "- **%ile (3y)** — rank in its 3-year range (95% ≈ near widest)\n"
+                "- **Signal** — the colored band above\n\n"
+                "**The three charts**\n"
+                "1. **Z-score bar** — every spread on one σ axis; dotted ±1σ, "
+                "dashed ±2σ. *What's stretched today?*\n"
+                "2. **Level + bands** — the spread vs shaded ±1σ/±2σ. Outside the "
+                "bands = an extreme.\n"
+                "3. **Rolling z-score** — the z through time. *How it got here.*"
+            )
+        st.caption(
+            "Why only a handful of spreads? Each needs two clean, current, free "
+            "series. The US is the only economy with a full free daily par curve "
+            "(3M…30Y) on FRED, so it's the only one with a true within-country "
+            "curve slope; for the rest we build cross-country 10Y gaps. Not "
+            "investment advice."
+        )
+
+
 def module_zscore(api_key: str) -> None:
     """Render the Spread Z-Score monitor (Module B).
 
@@ -1097,6 +1289,8 @@ def module_zscore(api_key: str) -> None:
         "recent norm; deeply negative means unusually compressed/inverted. "
         "Descriptive, not a trade signal."
     )
+
+    _zscore_explainer()
 
 
 def module_timeseries(api_key: str) -> None:

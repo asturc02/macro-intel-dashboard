@@ -303,6 +303,25 @@ FLAGS: dict[str, str] = {
 COUNTRY_BY_CODE: dict[str, Country] = {c.code: c for c in COUNTRIES}
 BASE_COUNTRY: str = "US"  # carry / differentials are measured against the USD leg
 
+# --- Carry-pair monitor (Module A+) -----------------------------------------
+# Classic FX carry pairs: go long the (usually higher-yielding) base leg funded
+# by shorting the quote leg. Each entry is a (long_code, short_code) pair of
+# country codes; the display name uses each leg's ISO currency (e.g. AU/JP →
+# "AUD/JPY"). Carry = policy[long] − policy[short]; risk = annualized realized
+# vol of the cross rate; Carry/Vol = a transparent risk-adjusted ("implied
+# Sharpe") ranking. Orientation is the conventional market quote, so a negative
+# carry (e.g. EUR/CAD, where CAD out-yields EUR) is shown honestly rather than
+# flipped. Both legs must have a resolvable policy rate and be Frankfurter-quoted
+# (so ARS, unsupported by the ECB feed, is excluded).
+CARRY_PAIRS: tuple[tuple[str, str], ...] = (
+    ("AU", "JP"),   # AUD/JPY — the textbook carry trade
+    ("NZ", "JP"),   # NZD/JPY
+    ("BR", "JP"),   # BRL/JPY — high-yield EM funded in yen
+    ("GB", "JP"),   # GBP/JPY
+    ("US", "JP"),   # USD/JPY — the macro bellwether
+    ("EA", "CA"),   # EUR/CAD
+)
+
 # --- Time-series explorer -------------------------------------------------
 METRIC_LABELS: dict[str, str] = {
     "policy_rate": "Policy Rate (%)",
