@@ -26,7 +26,7 @@ import metrics
 import national
 import utils
 
-BUILD_MARKER = "build: macro-intel v13 (UK ONS + AR INDEC)"
+BUILD_MARKER = "build: macro-intel v14 (Japan e-Stat CPI)"
 
 st.set_page_config(
     page_title="Macro Intelligence Dashboard",
@@ -189,17 +189,16 @@ def metric_series(
         A date-indexed Series in display units (possibly empty).
     """
     # National-source override (e.g. ABS AU CPI, BCB Selic) takes precedence
-    # over the stale/missing FRED series for that (country, metric).
+    # over the stale/missing FRED series. If it yields nothing (no key set or a
+    # transient failure), fall back to the FRED series so a cell degrades to the
+    # older value rather than to n/a.
     override = NATIONAL_OVERRIDES.get((country.code, metric))
-    if override is not None:
-        series = override()
-    else:
+    series = override() if override is not None else pd.Series(dtype="float64")
+    if series.empty:
         sid = getattr(country, metric)
-        if not sid:
-            return pd.Series(dtype="float64")
-        if metric == "cpi_yoy" and country.cpi_is_index:
+        if sid and metric == "cpi_yoy" and country.cpi_is_index:
             series = fred.to_yoy(get_series(sid, api_key, None))
-        else:
+        elif sid:
             series = get_series(sid, api_key, start)
     if start and not series.empty:
         series = series[series.index >= pd.Timestamp(start)]
@@ -250,6 +249,7 @@ def _nat(name: str) -> pd.Series:
         "no_cpi_yoy": national.no_cpi_yoy,
         "gb_cpi_yoy": national.gb_cpi_yoy,
         "ar_cpi_yoy": national.ar_cpi_yoy,
+        "jp_cpi_yoy": national.jp_cpi_yoy,
     }[name]()
 
 
@@ -264,6 +264,9 @@ NATIONAL_OVERRIDES: dict[tuple[str, str], object] = {
     ("NO", "cpi_yoy"): lambda: _nat("no_cpi_yoy"),
     ("GB", "cpi_yoy"): lambda: _nat("gb_cpi_yoy"),
     ("AR", "cpi_yoy"): lambda: _nat("ar_cpi_yoy"),
+    # Japan uses e-Stat only when an app ID is configured; otherwise metric_series
+    # falls back to the FRED series automatically.
+    ("JP", "cpi_yoy"): lambda: _nat("jp_cpi_yoy"),
 }
 # Human-readable source labels for the Data Health panel.
 SOURCE_LABEL: dict[tuple[str, str], str] = {
@@ -276,6 +279,8 @@ SOURCE_LABEL: dict[tuple[str, str], str] = {
     ("GB", "cpi_yoy"): "ONS (D7G7)",
     ("AR", "cpi_yoy"): "INDEC (datos.gob.ar)",
 }
+if config.ESTAT_APP_ID:  # label JP as e-Stat only when it will actually be used
+    SOURCE_LABEL[("JP", "cpi_yoy")] = "e-Stat (0003427113)"
 
 
 def warm_cache(api_key: str) -> None:
@@ -312,8 +317,11 @@ def warm_cache(api_key: str) -> None:
         for _name, rid, _tier in config.KEY_RELEASES:
             pool.submit(get_release_dates, rid, api_key)
         pool.submit(get_au_cpi_yoy)  # ABS national CPI (Australia)
-        for nat_name in ("br_selic", "br_ipca_yoy", "br_unemployment",
-                         "ca_cpi_yoy", "no_cpi_yoy", "gb_cpi_yoy", "ar_cpi_yoy"):
+        nat_names = ["br_selic", "br_ipca_yoy", "br_unemployment", "ca_cpi_yoy",
+                     "no_cpi_yoy", "gb_cpi_yoy", "ar_cpi_yoy"]
+        if config.ESTAT_APP_ID:
+            nat_names.append("jp_cpi_yoy")
+        for nat_name in nat_names:
             pool.submit(_nat, nat_name)
 
 
@@ -475,7 +483,8 @@ def render_footer() -> None:
               <a href="https://www.statcan.gc.ca/">StatCan</a> (CA),
               <a href="https://www.ssb.no/en">SSB</a> (NO),
               <a href="https://www.ons.gov.uk/">ONS</a> (UK),
-              <a href="https://datos.gob.ar/">INDEC</a> (AR).<br>
+              <a href="https://datos.gob.ar/">INDEC</a> (AR),
+              <a href="https://www.e-stat.go.jp/">e-Stat</a> (JP).<br>
               Portfolio project for educational purposes — <b>not financial advice</b>.
             </div>
             """,
@@ -614,9 +623,9 @@ def module_carry(snap: pd.DataFrame, api_key: str) -> None:
     st.caption(
         "ℹ️ Policy rate is the actual target for US (Fed) & EA (ECB); for other "
         "economies it's a money-market proxy (3m interbank / overnight). GDP is "
-        "the latest quarter's real growth, annualized. CPI is now current for "
-        "US/EA plus AU/CA/NO/GB (ABS/StatCan/SSB/ONS) and AR (INDEC); Brazil adds "
-        "BCB Selic + IBGE. Only JP/NZ CPI still lag on free data. See **Data "
+        "the latest quarter's real growth, annualized. CPI is current for US/EA "
+        "plus AU/CA/NO/GB/JP (ABS/StatCan/SSB/ONS/e-Stat) and AR (INDEC); Brazil "
+        "adds BCB Selic + IBGE. Only New Zealand CPI still lags. See **Data "
         "Health** for the exact source & vintage of every cell."
     )
 

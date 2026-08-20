@@ -174,6 +174,48 @@ def ar_cpi_yoy() -> pd.Series:
     return (index.pct_change(12) * 100.0).dropna()
 
 
+# --- Japan ------------------------------------------------------------------
+def jp_cpi_yoy() -> pd.Series:
+    """Japan all-items CPI YoY %, live from the e-Stat API (Statistics Bureau).
+
+    Requires a free ``config.ESTAT_APP_ID``. Uses statsDataId 0003427113 (2020-
+    base CPI) with tab=3 (year-on-year %), cat01=0001 (all items), area=00000
+    (all Japan) — so the value is already YoY. Returns empty when the app ID is
+    absent, so the caller falls back to the FRED series.
+
+    Returns:
+        A month-indexed YoY % Series, or empty when unavailable.
+    """
+    app_id = config.ESTAT_APP_ID
+    if not app_id:
+        return _empty()
+    url = "https://api.e-stat.go.jp/rest/3.0/app/json/getStatsData"
+    try:
+        payload = requests.get(
+            url, headers=_HEADERS, timeout=_T,
+            params={"appId": app_id, "statsDataId": "0003427113", "cdTab": "3",
+                    "cdCat01": "0001", "cdArea": "00000", "metaGetFlg": "N",
+                    "limit": "500"},
+        ).json()
+        values = payload["GET_STATS_DATA"]["STATISTICAL_DATA"]["DATA_INF"]["VALUE"]
+    except (requests.RequestException, ValueError, KeyError):
+        return _empty()
+    if isinstance(values, dict):
+        values = [values]
+    dates, vals = [], []
+    for v in values:
+        code = str(v.get("@time", ""))  # e.g. "2026000404" -> year 2026, month 04
+        try:
+            year, month = int(code[:4]), int(code[-2:])
+            value = float(v.get("$"))
+        except (ValueError, TypeError):
+            continue
+        if 1 <= month <= 12:
+            dates.append(pd.Timestamp(year, month, 1))
+            vals.append(value)
+    return pd.Series(vals, index=pd.DatetimeIndex(dates)).sort_index()
+
+
 # --- Norway -----------------------------------------------------------------
 def no_cpi_yoy() -> pd.Series:
     """Norway all-items CPI YoY %, derived from the SSB index (table 03013)."""
