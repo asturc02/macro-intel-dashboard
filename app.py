@@ -18,13 +18,14 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+import abs_au
 import config
 import fred
 import fx
 import metrics
 import utils
 
-BUILD_MARKER = "build: macro-intel v10 (regime matrix)"
+BUILD_MARKER = "build: macro-intel v11 (ABS live AU CPI)"
 
 st.set_page_config(
     page_title="Macro Intelligence Dashboard",
@@ -189,7 +190,10 @@ def metric_series(
     sid = getattr(country, metric)
     if not sid:
         return pd.Series(dtype="float64")
-    if metric == "cpi_yoy" and country.cpi_is_index:
+    if metric == "cpi_yoy" and country.code == "AU":
+        # FRED's OECD AU CPI froze at 2025-Q1; use the live ABS national feed.
+        series = get_au_cpi_yoy()
+    elif metric == "cpi_yoy" and country.cpi_is_index:
         series = fred.to_yoy(get_series(sid, api_key, None))
     else:
         series = get_series(sid, api_key, start)
@@ -225,6 +229,16 @@ def get_fx_vol(currency: str) -> float | None:
     return fx.annualized_vol(currency)
 
 
+@st.cache_data(ttl=config.CACHE_TTL_SECONDS, show_spinner=False)
+def get_au_cpi_yoy() -> pd.Series:
+    """Cached Australian CPI YoY from the ABS national feed (no key needed).
+
+    Returns:
+        A date-indexed YoY % Series (possibly empty on failure).
+    """
+    return abs_au.fetch_cpi_yoy()
+
+
 def warm_cache(api_key: str) -> None:
     """Pre-fetch all snapshot/health series and FX vols in parallel.
 
@@ -258,6 +272,7 @@ def warm_cache(api_key: str) -> None:
             pool.submit(get_fx_vol, ccy)
         for _name, rid, _tier in config.KEY_RELEASES:
             pool.submit(get_release_dates, rid, api_key)
+        pool.submit(get_au_cpi_yoy)  # ABS national CPI (Australia)
 
 
 @st.cache_data(ttl=config.CACHE_TTL_SECONDS, show_spinner=False)
@@ -409,8 +424,9 @@ def render_footer() -> None:
             """
             <div class="mi-footer">
               <div class="mi-foot-h">Data &amp; Info</div>
-              Sources: <a href="https://fred.stlouisfed.org/">FRED</a> (St. Louis Fed)
-              &amp; <a href="https://www.frankfurter.app/">Frankfurter</a> / ECB.<br>
+              Sources: <a href="https://fred.stlouisfed.org/">FRED</a> (St. Louis Fed),
+              <a href="https://www.frankfurter.app/">Frankfurter</a> / ECB, and
+              <a href="https://www.abs.gov.au/">ABS</a> (AU CPI).<br>
               Portfolio project for educational purposes — <b>not financial advice</b>.
             </div>
             """,
@@ -549,9 +565,9 @@ def module_carry(snap: pd.DataFrame, api_key: str) -> None:
     st.caption(
         "ℹ️ Policy rate is the actual target for US (Fed) & EA (ECB); for other "
         "economies it's a money-market proxy (3m interbank / overnight). GDP is "
-        "the latest quarter's real growth, annualized. CPI is current for US/EA/JP; "
-        "some others lag ~1yr on free data. See **Data Health** for the exact "
-        "vintage of every cell."
+        "the latest quarter's real growth, annualized. CPI is current for US/EA/JP "
+        "and AU (via ABS); some others lag ~1yr on free data. See **Data Health** "
+        "for the exact vintage of every cell."
     )
 
     hawks = (snap["Stance"].str.contains("Hawk")).sum()
@@ -1159,9 +1175,12 @@ def module_health(api_key: str, snap: pd.DataFrame) -> None:
                 if attr == "cpi_yoy"
                 else get_series(sid, api_key, None)
             )
+            sid_display = (
+                "ABS CPI (SDMX)" if attr == "cpi_yoy" and c.code == "AU" else sid
+            )
             d, v = fred.latest(series)
             rows.append({
-                "Economy": c.name, "Metric": label, "Series ID": sid,
+                "Economy": c.name, "Metric": label, "Series ID": sid_display,
                 "Latest": d.date().isoformat() if d is not None else "n/a",
                 "Value": utils.fmt(v),
             })
