@@ -6,9 +6,9 @@
 > a free **economic calendar**, and a **click-through country deep-dive** — all
 > from **free** data (FRED + ECB), on an iOS-styled dark dashboard.
 
-### 🔗 Live demo → **_deploy URL here_**
+### 🔗 Live demo → **https://macrointeldashboard.streamlit.app/**
 
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://share.streamlit.io/)
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://macrointeldashboard.streamlit.app/)
 
 ![Dashboard screenshot placeholder](docs/screenshot.png)
 <!-- Replace docs/screenshot.png with a real screenshot once running. -->
@@ -82,7 +82,7 @@ fetches are **fanned out across a thread pool** for a fast first load.
 ## 🚀 Setup
 
 ```bash
-git clone https://github.com/<your-username>/macro-intel-dashboard.git
+git clone https://github.com/asturc02/macro-intel-dashboard.git
 cd macro-intel-dashboard
 python -m venv .venv
 .venv\Scripts\activate         # Windows  (source .venv/bin/activate on macOS/Linux)
