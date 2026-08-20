@@ -23,9 +23,10 @@ import config
 import fred
 import fx
 import metrics
+import national
 import utils
 
-BUILD_MARKER = "build: macro-intel v11 (ABS live AU CPI)"
+BUILD_MARKER = "build: macro-intel v12 (national sources: BR/CA/NO)"
 
 st.set_page_config(
     page_title="Macro Intelligence Dashboard",
@@ -187,16 +188,19 @@ def metric_series(
     Returns:
         A date-indexed Series in display units (possibly empty).
     """
-    sid = getattr(country, metric)
-    if not sid:
-        return pd.Series(dtype="float64")
-    if metric == "cpi_yoy" and country.code == "AU":
-        # FRED's OECD AU CPI froze at 2025-Q1; use the live ABS national feed.
-        series = get_au_cpi_yoy()
-    elif metric == "cpi_yoy" and country.cpi_is_index:
-        series = fred.to_yoy(get_series(sid, api_key, None))
+    # National-source override (e.g. ABS AU CPI, BCB Selic) takes precedence
+    # over the stale/missing FRED series for that (country, metric).
+    override = NATIONAL_OVERRIDES.get((country.code, metric))
+    if override is not None:
+        series = override()
     else:
-        series = get_series(sid, api_key, start)
+        sid = getattr(country, metric)
+        if not sid:
+            return pd.Series(dtype="float64")
+        if metric == "cpi_yoy" and country.cpi_is_index:
+            series = fred.to_yoy(get_series(sid, api_key, None))
+        else:
+            series = get_series(sid, api_key, start)
     if start and not series.empty:
         series = series[series.index >= pd.Timestamp(start)]
     return series
@@ -231,12 +235,41 @@ def get_fx_vol(currency: str) -> float | None:
 
 @st.cache_data(ttl=config.CACHE_TTL_SECONDS, show_spinner=False)
 def get_au_cpi_yoy() -> pd.Series:
-    """Cached Australian CPI YoY from the ABS national feed (no key needed).
-
-    Returns:
-        A date-indexed YoY % Series (possibly empty on failure).
-    """
+    """Cached Australian CPI YoY from the ABS national feed (no key needed)."""
     return abs_au.fetch_cpi_yoy()
+
+
+@st.cache_data(ttl=config.CACHE_TTL_SECONDS, show_spinner=False)
+def _nat(name: str) -> pd.Series:
+    """Cached dispatch to a national-source function by name."""
+    return {
+        "br_selic": national.br_selic,
+        "br_ipca_yoy": national.br_ipca_yoy,
+        "br_unemployment": national.br_unemployment,
+        "ca_cpi_yoy": national.ca_cpi_yoy,
+        "no_cpi_yoy": national.no_cpi_yoy,
+    }[name]()
+
+
+# (country_code, metric) -> a zero-arg callable returning the override Series.
+# These replace stale/missing FRED series with authoritative national sources.
+NATIONAL_OVERRIDES: dict[tuple[str, str], object] = {
+    ("AU", "cpi_yoy"): get_au_cpi_yoy,
+    ("BR", "policy_rate"): lambda: _nat("br_selic"),
+    ("BR", "cpi_yoy"): lambda: _nat("br_ipca_yoy"),
+    ("BR", "unemployment"): lambda: _nat("br_unemployment"),
+    ("CA", "cpi_yoy"): lambda: _nat("ca_cpi_yoy"),
+    ("NO", "cpi_yoy"): lambda: _nat("no_cpi_yoy"),
+}
+# Human-readable source labels for the Data Health panel.
+SOURCE_LABEL: dict[tuple[str, str], str] = {
+    ("AU", "cpi_yoy"): "ABS (SDMX)",
+    ("BR", "policy_rate"): "BCB Selic (SGS 432)",
+    ("BR", "cpi_yoy"): "IBGE IPCA",
+    ("BR", "unemployment"): "IBGE PNAD",
+    ("CA", "cpi_yoy"): "StatCan (v41690973)",
+    ("NO", "cpi_yoy"): "SSB (03013)",
+}
 
 
 def warm_cache(api_key: str) -> None:
@@ -273,6 +306,9 @@ def warm_cache(api_key: str) -> None:
         for _name, rid, _tier in config.KEY_RELEASES:
             pool.submit(get_release_dates, rid, api_key)
         pool.submit(get_au_cpi_yoy)  # ABS national CPI (Australia)
+        for nat_name in ("br_selic", "br_ipca_yoy", "br_unemployment",
+                         "ca_cpi_yoy", "no_cpi_yoy"):
+            pool.submit(_nat, nat_name)
 
 
 @st.cache_data(ttl=config.CACHE_TTL_SECONDS, show_spinner=False)
@@ -292,16 +328,17 @@ def build_snapshot(api_key: str) -> pd.DataFrame:
     """
     # Base (US) legs for carry / differential calculations.
     us = config.COUNTRY_BY_CODE[config.BASE_COUNTRY]
-    us_policy = fred.latest(get_series(us.policy_rate, api_key, None))[1]
-    us_y10 = fred.latest(get_series(us.y10, api_key, None))[1]
+    us_policy = fred.latest(metric_series(us, "policy_rate", api_key))[1]
+    us_y10 = fred.latest(metric_series(us, "y10", api_key))[1]
 
     rows: list[dict] = []
     for c in config.COUNTRIES:
-        policy = fred.latest(get_series(c.policy_rate, api_key, None))[1]
+        # metric_series applies national-source overrides where configured.
+        policy = fred.latest(metric_series(c, "policy_rate", api_key))[1]
         cpi = fred.latest(metric_series(c, "cpi_yoy", api_key))[1]
-        unemp = fred.latest(get_series(c.unemployment, api_key, None))[1]
-        y10 = fred.latest(get_series(c.y10, api_key, None))[1]
-        rate_chg = fred.change_over(get_series(c.policy_rate, api_key, None), 6)
+        unemp = fred.latest(metric_series(c, "unemployment", api_key))[1]
+        y10 = fred.latest(metric_series(c, "y10", api_key))[1]
+        rate_chg = fred.change_over(metric_series(c, "policy_rate", api_key), 6)
 
         # GDP: latest quarter's real QoQ growth, annualized for a comparable
         # baseline (matches the standard "annualized rate" reporting).
@@ -424,9 +461,13 @@ def render_footer() -> None:
             """
             <div class="mi-footer">
               <div class="mi-foot-h">Data &amp; Info</div>
-              Sources: <a href="https://fred.stlouisfed.org/">FRED</a> (St. Louis Fed),
-              <a href="https://www.frankfurter.app/">Frankfurter</a> / ECB, and
-              <a href="https://www.abs.gov.au/">ABS</a> (AU CPI).<br>
+              Sources: <a href="https://fred.stlouisfed.org/">FRED</a>,
+              <a href="https://www.frankfurter.app/">Frankfurter</a>/ECB,
+              <a href="https://www.abs.gov.au/">ABS</a> (AU),
+              <a href="https://www.bcb.gov.br/">BCB</a> &amp;
+              <a href="https://www.ibge.gov.br/">IBGE</a> (BR),
+              <a href="https://www.statcan.gc.ca/">StatCan</a> (CA),
+              <a href="https://www.ssb.no/en">SSB</a> (NO).<br>
               Portfolio project for educational purposes — <b>not financial advice</b>.
             </div>
             """,
@@ -566,8 +607,9 @@ def module_carry(snap: pd.DataFrame, api_key: str) -> None:
         "ℹ️ Policy rate is the actual target for US (Fed) & EA (ECB); for other "
         "economies it's a money-market proxy (3m interbank / overnight). GDP is "
         "the latest quarter's real growth, annualized. CPI is current for US/EA/JP "
-        "and AU (via ABS); some others lag ~1yr on free data. See **Data Health** "
-        "for the exact vintage of every cell."
+        "plus AU/CA/NO (national sources); Brazil now uses BCB (Selic) + IBGE "
+        "(inflation, unemployment). UK/NZ/AR still lag or are n/a on free data. "
+        "See **Data Health** for the exact source & vintage of every cell."
     )
 
     hawks = (snap["Stance"].str.contains("Hawk")).sum()
@@ -1165,22 +1207,17 @@ def module_health(api_key: str, snap: pd.DataFrame) -> None:
     ]
     for c in config.COUNTRIES:
         for label, attr in fields:
+            has_override = (c.code, attr) in NATIONAL_OVERRIDES
             sid = getattr(c, attr)
-            if not sid:
+            if not has_override and not sid:
                 rows.append({"Economy": c.name, "Metric": label,
                              "Series ID": "—", "Latest": "n/a", "Value": "n/a"})
                 continue
-            series = (
-                metric_series(c, "cpi_yoy", api_key)
-                if attr == "cpi_yoy"
-                else get_series(sid, api_key, None)
-            )
-            sid_display = (
-                "ABS CPI (SDMX)" if attr == "cpi_yoy" and c.code == "AU" else sid
-            )
+            series = metric_series(c, attr, api_key)
+            source = SOURCE_LABEL.get((c.code, attr), sid)
             d, v = fred.latest(series)
             rows.append({
-                "Economy": c.name, "Metric": label, "Series ID": sid_display,
+                "Economy": c.name, "Metric": label, "Series ID": source,
                 "Latest": d.date().isoformat() if d is not None else "n/a",
                 "Value": utils.fmt(v),
             })
