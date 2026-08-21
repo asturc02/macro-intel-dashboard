@@ -11,6 +11,7 @@ live in ``fred.py``, ``fx.py``, and ``metrics.py``.
 from __future__ import annotations
 
 import datetime
+import json
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 
@@ -26,7 +27,7 @@ import metrics
 import national
 import utils
 
-BUILD_MARKER = "build: macro-intel v19 (Module C+ — GDP YoY, core CPI, normalize)"
+BUILD_MARKER = "build: macro-intel v20 (JSON macro-summary export — v2 complete)"
 
 st.set_page_config(
     page_title="Macro Intelligence Dashboard",
@@ -453,6 +454,126 @@ def build_snapshot(api_key: str) -> pd.DataFrame:
     return pd.DataFrame(rows).set_index("code")
 
 
+def _num(v: object) -> float | None:
+    """Coerce a value to a JSON-safe float, mapping missing/NaN to ``None``."""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if pd.isna(f) else round(f, 4)
+
+
+def _clean_stance(badge: str) -> str | None:
+    """Reduce a stance badge (e.g. ``"🦅 Hawk"``) to a plain label for JSON."""
+    for label in (config.HAWK, config.NEUTRAL, config.DOVE):
+        if label in (badge or ""):
+            return label
+    return None
+
+
+def build_macro_summary(snap: pd.DataFrame, api_key: str) -> dict:
+    """Assemble a structured, machine-readable macro summary for JSON export.
+
+    A single self-describing document — the kind of ``/macro-summary`` payload a
+    downstream service or notebook would consume: per-economy fundamentals and
+    regime, the carry-pair ranking, the spread z-scores, and the US par curve.
+    Values are drawn from the already-cached snapshot and series, so this is
+    cheap to build. Missing data is emitted as ``null`` (never ``NaN``).
+
+    Args:
+        snap: The cross-country snapshot (from :func:`build_snapshot`).
+        api_key: Resolved FRED key.
+
+    Returns:
+        A JSON-serializable dict.
+    """
+    economies: list[dict] = []
+    for c in config.COUNTRIES:
+        row = snap.loc[c.code]
+        growth = (fred.change_over(get_series(c.gdp_qoq, api_key, None), 12)
+                  if c.gdp_qoq else None)
+        infl = fred.change_over(metric_series(c, "cpi_yoy", api_key), 12)
+        regime = (metrics.classify_regime(growth, infl)
+                  if growth is not None and infl is not None else None)
+        _, core = fred.latest(explorer_series(c, "core_cpi", api_key))
+        _, gdp_yoy = fred.latest(explorer_series(c, "gdp_yoy", api_key))
+        economies.append({
+            "code": c.code, "name": c.name, "currency": c.currency,
+            "central_bank": c.central_bank,
+            "inflation_target": c.inflation_target,
+            "is_emerging": bool(c.is_emerging),
+            "stance": _clean_stance(row["Stance"]),
+            "regime": regime,
+            "policy_rate": _num(row["Policy %"]),
+            "cpi_yoy": _num(row["CPI YoY %"]),
+            "core_cpi_yoy": _num(core),
+            "real_rate": _num(row["Real Rate %"]),
+            "unemployment": _num(row["Unemp %"]),
+            "gdp_annualized": _num(row["GDP %"]),
+            "gdp_yoy": _num(gdp_yoy),
+            "y10": _num(row["10Y %"]),
+            "carry_vs_usd": _num(row["Carry vs USD"]),
+            "y10_vs_us": _num(row["10Y vs US"]),
+            "fx_vol": _num(row["FX Vol %"]),
+            "carry_vol_ratio": _num(row["Carry/Vol"]),
+        })
+
+    pairs: list[dict] = []
+    for long_c, short_c in config.CARRY_PAIRS:
+        cl = config.COUNTRY_BY_CODE[long_c]
+        cs = config.COUNTRY_BY_CODE[short_c]
+        p_long = _num(snap.loc[long_c, "Policy %"])
+        p_short = _num(snap.loc[short_c, "Policy %"])
+        carry = metrics.carry_vs_base(p_long, p_short)
+        vol = get_cross_vol(cl.currency, cs.currency)
+        pairs.append({
+            "pair": f"{cl.currency}/{cs.currency}",
+            "long": cl.currency, "short": cs.currency,
+            "carry": _num(carry), "fx_vol": _num(vol),
+            "carry_vol_ratio": _num(metrics.implied_sharpe(carry, vol)),
+            "spot": _num(get_cross_spot(cl.currency, cs.currency)),
+        })
+
+    spreads: list[dict] = []
+    for label, kind, ref, note in config.SPREADS:
+        s = _spread_series(kind, ref, api_key)
+        if s.empty:
+            spreads.append({"name": label, "current": None, "mean_3y": None,
+                            "z_score": None, "percentile_3y": None})
+            continue
+        window = max(4, config.ZSCORE_WINDOW_YEARS * metrics.periods_per_year(s.index))
+        z = metrics.rolling_zscore(s, window).dropna()
+        recent = s.tail(window)
+        pct = float((recent < s.iloc[-1]).mean()) * 100.0 if len(recent) > 1 else None
+        spreads.append({
+            "name": label,
+            "current": _num(s.iloc[-1]), "mean_3y": _num(recent.mean()),
+            "z_score": _num(z.iloc[-1]) if not z.empty else None,
+            "percentile_3y": _num(pct),
+        })
+
+    us_curve: dict[str, float | None] = {}
+    for lbl in config.US_CURVE_ORDER:
+        cs = get_series(config.US_CURVE[lbl], api_key, None)
+        us_curve[lbl] = _num(cs.iloc[-1]) if not cs.empty else None
+
+    return {
+        "schema": "macro-summary/v1",
+        "generated_at": datetime.datetime.now(datetime.timezone.utc)
+                        .isoformat(timespec="seconds"),
+        "base_currency": config.COUNTRY_BY_CODE[config.BASE_COUNTRY].currency,
+        "source": "Macro Intelligence Dashboard — Cristopher Astur",
+        "disclaimer": "Educational use; free public data (FRED, national/official "
+                      "statistics offices, ECB). Not investment advice.",
+        "economies": economies,
+        "carry_pairs": pairs,
+        "spread_zscores": spreads,
+        "us_yield_curve": us_curve,
+    }
+
+
 def _style_fig(fig: go.Figure, height: int = 420) -> go.Figure:
     """Apply the shared dark theme to a Plotly figure.
 
@@ -700,6 +821,23 @@ def module_carry(snap: pd.DataFrame, api_key: str) -> None:
     if not best.empty:
         top = best.idxmax()
         c4.metric("Best carry/vol", snap.loc[top, "CCY"], f"{best.max():+.2f}")
+
+    dl1, dl2 = st.columns([1, 3])
+    with dl1:
+        summary = build_macro_summary(snap, api_key)
+        st.download_button(
+            "⬇️  Macro summary (JSON)",
+            data=json.dumps(summary, indent=2, ensure_ascii=False),
+            file_name=f"macro_summary_{datetime.date.today().isoformat()}.json",
+            mime="application/json", use_container_width=True,
+        )
+    with dl2:
+        st.caption(
+            "One structured **/macro-summary** document — every economy's "
+            "fundamentals & regime, the carry-pair ranking, spread z-scores and "
+            "the US curve — the kind of payload a downstream notebook or service "
+            "would consume. Missing data is `null`, never `NaN`."
+        )
 
     display_cols = [
         "Economy", "CCY", "Stance", "Policy %", "CPI YoY %", "Real Rate %",
