@@ -26,7 +26,7 @@ import metrics
 import national
 import utils
 
-BUILD_MARKER = "build: macro-intel v18 (Module A+ — carry pairs)"
+BUILD_MARKER = "build: macro-intel v19 (Module C+ — GDP YoY, core CPI, normalize)"
 
 st.set_page_config(
     page_title="Macro Intelligence Dashboard",
@@ -205,6 +205,43 @@ def metric_series(
     return series
 
 
+def explorer_series(
+    country: config.Country, metric_key: str, api_key: str, start: str | None = None
+) -> pd.Series:
+    """Resolve any Time-Series Explorer metric, including the derived ones.
+
+    Extends :func:`metric_series` with two computed metrics: ``gdp_yoy`` (YoY GDP
+    compounded from the live QoQ series, since the direct OECD YoY series froze)
+    and ``core_cpi`` (core CPI YoY from :data:`config.CORE_CPI`). Both are derived
+    from full history and then sliced, so short windows still yield valid YoY.
+
+    Args:
+        country: The economy.
+        metric_key: A key of :data:`config.METRIC_LABELS`.
+        api_key: Resolved FRED key.
+        start: Optional ISO lower bound for the window.
+
+    Returns:
+        A date-indexed Series in display units (possibly empty).
+    """
+    if metric_key == "gdp_yoy":
+        qoq = get_series(country.gdp_qoq, api_key, None) if country.gdp_qoq else pd.Series(dtype="float64")
+        series = fred.compound_yoy(qoq)
+    elif metric_key == "core_cpi":
+        spec = config.CORE_CPI.get(country.code)
+        if spec is None:
+            series = pd.Series(dtype="float64")
+        else:
+            sid, is_index = spec
+            raw = get_series(sid, api_key, None)
+            series = fred.to_yoy(raw) if is_index else raw
+    else:
+        return metric_series(country, metric_key, api_key, start)
+    if start and not series.empty:
+        series = series[series.index >= pd.Timestamp(start)]
+    return series
+
+
 @st.cache_data(ttl=config.CACHE_TTL_SECONDS, show_spinner=False)
 def get_release_dates(release_id: int, api_key: str) -> list[str]:
     """Cached wrapper around :func:`fred.fetch_release_dates`.
@@ -322,6 +359,8 @@ def warm_cache(api_key: str) -> None:
     for label, sid, transform, note in (
         config.LEADING_EMPLOYMENT + config.LEADING_INFLATION
     ):
+        series_ids.add(sid)
+    for sid, _is_index in config.CORE_CPI.values():  # core CPI (explorer metric)
         series_ids.add(sid)
     currencies = [c.currency for c in config.COUNTRIES if c.currency != "USD"]
 
@@ -1300,6 +1339,12 @@ def module_timeseries(api_key: str) -> None:
         api_key: Resolved FRED key.
     """
     st.subheader("Time-Series Explorer")
+    st.caption(
+        "Compare any macro metric across economies — now including **GDP YoY** "
+        "(compounded from the live quarterly series) and **Core CPI YoY** (ex "
+        "food & energy). Toggle **Normalize** to overlay series with different "
+        "units on one z-score scale."
+    )
 
     c1, c2 = st.columns([3, 2])
     with c1:
@@ -1321,10 +1366,16 @@ def module_timeseries(api_key: str) -> None:
         palette = palette_picker("ts_palette")
     start = utils.window_start(window_years)
 
-    dual = st.checkbox(
-        "Add a second metric on a right axis (uses the first economy)",
-        value=False, key="ts_dual",
-    )
+    opt1, opt2 = st.columns(2)
+    with opt1:
+        normalize = st.checkbox(
+            "Normalize to rolling z-score (compare units on one σ scale)",
+            value=False, key="ts_normalize",
+        )
+    with opt2:
+        dual = st.checkbox(
+            "Add a second metric (first economy)", value=False, key="ts_dual",
+        )
     metric_key2 = None
     if dual:
         metric_key2 = st.selectbox(
@@ -1336,10 +1387,21 @@ def module_timeseries(api_key: str) -> None:
         st.info("Pick at least one economy.")
         return
 
+    def _prep(s: pd.Series) -> pd.Series:
+        """Optionally convert a series to its rolling 3-year z-score."""
+        if not normalize or s.empty:
+            return s
+        ppy = metrics.periods_per_year(s.index)
+        return metrics.rolling_zscore(s, max(4, 3 * ppy)).dropna()
+
+    # When normalized every series is a unitless σ, so a right axis is redundant
+    # — the second metric shares the primary axis.
+    use_y2 = bool(metric_key2) and not normalize
+
     fig = go.Figure()
     for i, code in enumerate(codes):
         c = config.COUNTRY_BY_CODE[code]
-        s = metric_series(c, metric_key, api_key, start)
+        s = _prep(explorer_series(c, metric_key, api_key, start))
         if s.empty:
             continue
         fig.add_trace(go.Scatter(
@@ -1349,22 +1411,49 @@ def module_timeseries(api_key: str) -> None:
 
     if metric_key2:
         c = config.COUNTRY_BY_CODE[codes[0]]
-        s2 = metric_series(c, metric_key2, api_key, start)
+        s2 = _prep(explorer_series(c, metric_key2, api_key, start))
         if not s2.empty:
             fig.add_trace(go.Scatter(
-                x=s2.index, y=s2.values, name=f"{c.currency} · {config.METRIC_LABELS[metric_key2]}",
-                line=dict(color=config.COLOR_ACCENT, dash="dash"), yaxis="y2",
+                x=s2.index, y=s2.values,
+                name=f"{c.currency} · {config.METRIC_LABELS[metric_key2]}",
+                line=dict(color=config.COLOR_ACCENT, dash="dash"),
+                yaxis="y2" if use_y2 else "y",
             ))
-            fig.update_layout(yaxis2=dict(
-                title=config.METRIC_LABELS[metric_key2], overlaying="y",
-                side="right", gridcolor=config.COLOR_GRID,
-            ))
+            if use_y2:
+                fig.update_layout(yaxis2=dict(
+                    title=config.METRIC_LABELS[metric_key2], overlaying="y",
+                    side="right", gridcolor=config.COLOR_GRID,
+                ))
 
-    fig.update_layout(
-        title=f"{config.METRIC_LABELS[metric_key]} over time",
-        xaxis_title="Date", yaxis_title=config.METRIC_LABELS[metric_key],
-    )
+    if normalize:
+        for yv, dash in ((2, "dash"), (1, "dot"), (-1, "dot"), (-2, "dash")):
+            fig.add_hline(y=yv, line_width=1, line_dash=dash,
+                          line_color=config.COLOR_GRID)
+        fig.add_hline(y=0, line_width=1, line_color=config.COLOR_NEUTRAL)
+        title = f"{config.METRIC_LABELS[metric_key]} — normalized (rolling z-score)"
+        ytitle = "Rolling z-score (σ from 3y mean)"
+    else:
+        title = f"{config.METRIC_LABELS[metric_key]} over time"
+        ytitle = config.METRIC_LABELS[metric_key]
+
+    fig.update_layout(title=title, xaxis_title="Date", yaxis_title=ytitle)
     st.plotly_chart(_style_fig(fig, 460), use_container_width=True)
+
+    notes = []
+    if metric_key == "gdp_yoy" or metric_key2 == "gdp_yoy":
+        notes.append("**GDP YoY** is compounded from the live QoQ growth series "
+                     "(the direct OECD YoY series froze), so it stays current.")
+    if metric_key == "core_cpi" or metric_key2 == "core_cpi":
+        notes.append("**Core CPI** is current for the US (FRED CPILFESL); the euro "
+                     "area (DE proxy), UK, Canada and Norway use the OECD core "
+                     "series, which lags ~1yr; other economies have no free core "
+                     "series and are omitted.")
+    if normalize:
+        notes.append("**Normalized** view shows each series as standard deviations "
+                     "from its own rolling 3-year mean, so differently-scaled "
+                     "metrics/economies line up; ±1σ/±2σ guides are drawn.")
+    if notes:
+        st.caption("  \n".join(notes))
 
 
 def _leading_row(

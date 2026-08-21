@@ -187,6 +187,28 @@ def change_over(series: pd.Series, months: int) -> float | None:
     return last_val - float(prior.iloc[-1])
 
 
+def compound_yoy(qoq_pct: pd.Series, periods: int = 4) -> pd.Series:
+    """Compound a quarter-over-quarter growth-rate series into year-over-year.
+
+    OECD's ``NAEXKP01..Q657S`` GDP series is a *QoQ* percent growth rate; chaining
+    four consecutive quarters gives the YoY rate — a smoother, more standard read
+    than a single annualized quarter, and current where the direct YoY series has
+    frozen.
+
+    Args:
+        qoq_pct: Quarter-over-quarter growth in percent (e.g. ``0.37`` for +0.37%).
+        periods: Number of periods to compound (``4`` for quarterly → YoY).
+
+    Returns:
+        A YoY percent-change series (NaNs dropped). Empty when the input is empty.
+    """
+    if qoq_pct is None or qoq_pct.empty:
+        return pd.Series(dtype="float64")
+    factor = 1.0 + qoq_pct / 100.0
+    yoy = factor.rolling(periods).apply(lambda w: w.prod(), raw=True) - 1.0
+    return (yoy * 100.0).dropna()
+
+
 def to_yoy(index_series: pd.Series) -> pd.Series:
     """Convert a price *index* series to a year-over-year percent-change series.
 

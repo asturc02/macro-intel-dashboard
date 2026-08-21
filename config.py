@@ -326,8 +326,25 @@ CARRY_PAIRS: tuple[tuple[str, str], ...] = (
 METRIC_LABELS: dict[str, str] = {
     "policy_rate": "Policy Rate (%)",
     "cpi_yoy": "CPI YoY (%)",
+    "core_cpi": "Core CPI YoY (%)",
     "unemployment": "Unemployment (%)",
     "y10": "10Y Gov. Bond Yield (%)",
+    "gdp_yoy": "GDP YoY (%)",
+}
+
+# Core CPI (ex food & energy) YoY. code -> (series_id, is_index). ``is_index``
+# means the series is a price index and YoY is computed from it; otherwise the
+# series is already a YoY growth rate. Only the US core is current on FRED
+# (CPILFESL, updated monthly); the OECD "CPI less food & energy" YoY series for
+# the euro area, UK, Canada and Norway froze ~2025 (same MEI freeze as headline)
+# — still useful for history. Economies with no free core series are omitted and
+# the explorer simply skips that line.
+CORE_CPI: dict[str, tuple[str, bool]] = {
+    "US": ("CPILFESL", True),        # US core CPI index -> YoY (current)
+    "EA": ("CPGRLE01DEM659N", False),  # Germany core CPI YoY (proxy for EA)
+    "GB": ("CPGRLE01GBM659N", False),
+    "CA": ("CPGRLE01CAM659N", False),
+    "NO": ("CPGRLE01NOM659N", False),
 }
 WINDOW_YEARS: dict[str, int | None] = {"1Y": 1, "2Y": 2, "5Y": 5, "Max": None}
 
