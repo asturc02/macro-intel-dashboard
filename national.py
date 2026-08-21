@@ -12,7 +12,8 @@ Sources
 * **Canada**  — Statistics Canada (WDS) for the CPI; YoY derived from the index.
 * **Norway**  — Statistics Norway (SSB PxWebApi) for the CPI; YoY from the index.
 * **UK**      — ONS website time-series ``/data`` endpoint (CPI annual rate).
-* **Argentina** — datos.gob.ar Series API (INDEC national IPC); YoY from index.
+* **Argentina** — datos.gob.ar Series API (INDEC national IPC & EPH
+  unemployment); ArgentinaDatos (BCRA 30-day deposit rate as a policy proxy).
 """
 
 from __future__ import annotations
@@ -176,6 +177,70 @@ def ar_cpi_yoy() -> pd.Series:
             continue
     index = pd.Series(vals, index=pd.DatetimeIndex(dates)).sort_index()
     return (index.pct_change(12) * 100.0).dropna()
+
+
+def ar_policy_rate() -> pd.Series:
+    """Argentina policy-rate proxy: BCRA 30-day time-deposit rate (% TNA).
+
+    The BCRA's own "tasa de política monetaria" series was discontinued in mid-
+    2025 when the monetary framework changed, so there is no current official
+    policy-rate feed. The 30-day wholesale deposit rate (from ArgentinaDatos,
+    sourced from the BCRA) is the closest current money-market rate and serves as
+    the stance proxy — consistent with the money-market proxies used for other
+    non-US/EA economies.
+
+    ArgentinaDatos reports this rate as a decimal fraction in the earlier history
+    (e.g. ``0.31`` = 31%) but as a percentage number more recently (e.g. ``32.75``
+    = 32.75%); values below 2 are therefore scaled by 100 so the series is a
+    continuous percentage. (Argentine deposit TNAs never reached 200%, so no real
+    percentage value is < 2 and no fraction is ≥ 2 — the split is unambiguous.)
+
+    Returns:
+        A date-indexed Series of the rate in percent, or empty on failure.
+    """
+    url = "https://api.argentinadatos.com/v1/finanzas/tasas/depositos30Dias"
+    try:
+        rows = requests.get(url, headers=_HEADERS, timeout=_T).json()
+    except (requests.RequestException, ValueError):
+        return _empty()
+    dates, vals = [], []
+    for r in rows:
+        try:
+            v = float(r["valor"])
+            dates.append(pd.Timestamp(r["fecha"]))
+            vals.append(v * 100.0 if v < 2 else v)
+        except (KeyError, ValueError, TypeError):
+            continue
+    return pd.Series(vals, index=pd.DatetimeIndex(dates)).sort_index()
+
+
+def ar_unemployment() -> pd.Series:
+    """Argentina national unemployment rate (%), quarterly, via datos.gob.ar.
+
+    INDEC's EPH national total unemployment (series ``45.2_ECTDT_0_T_33``). The
+    API reports it as a fraction (``0.078`` = 7.8%), so it is scaled to percent.
+
+    Returns:
+        A quarter-indexed Series in percent, or empty on failure.
+    """
+    url = "https://apis.datos.gob.ar/series/api/series/"
+    try:
+        data = requests.get(
+            url, headers=_HEADERS, timeout=_T,
+            params={"ids": "45.2_ECTDT_0_T_33", "format": "json", "limit": 200},
+        ).json()["data"]
+    except (requests.RequestException, ValueError, KeyError):
+        return _empty()
+    dates, vals = [], []
+    for row in data:
+        try:  # parse the value first so a null row never desyncs the two lists
+            value = float(row[1]) * 100.0
+            date = pd.Timestamp(row[0])
+        except (IndexError, ValueError, TypeError):
+            continue
+        dates.append(date)
+        vals.append(value)
+    return pd.Series(vals, index=pd.DatetimeIndex(dates)).sort_index()
 
 
 # --- Japan ------------------------------------------------------------------

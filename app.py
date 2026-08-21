@@ -27,7 +27,7 @@ import metrics
 import national
 import utils
 
-BUILD_MARKER = "build: macro-intel v20 (JSON macro-summary export — v2 complete)"
+BUILD_MARKER = "build: macro-intel v21 (Argentina policy rate + unemployment live)"
 
 st.set_page_config(
     page_title="Macro Intelligence Dashboard",
@@ -300,6 +300,8 @@ def _nat(name: str) -> pd.Series:
         "no_cpi_yoy": national.no_cpi_yoy,
         "gb_cpi_yoy": national.gb_cpi_yoy,
         "ar_cpi_yoy": national.ar_cpi_yoy,
+        "ar_policy_rate": national.ar_policy_rate,
+        "ar_unemployment": national.ar_unemployment,
         "jp_cpi_yoy": national.jp_cpi_yoy,
         "nz_cpi_yoy": national.nz_cpi_yoy,
     }[name]()
@@ -316,6 +318,8 @@ NATIONAL_OVERRIDES: dict[tuple[str, str], object] = {
     ("NO", "cpi_yoy"): lambda: _nat("no_cpi_yoy"),
     ("GB", "cpi_yoy"): lambda: _nat("gb_cpi_yoy"),
     ("AR", "cpi_yoy"): lambda: _nat("ar_cpi_yoy"),
+    ("AR", "policy_rate"): lambda: _nat("ar_policy_rate"),
+    ("AR", "unemployment"): lambda: _nat("ar_unemployment"),
     ("NZ", "cpi_yoy"): lambda: _nat("nz_cpi_yoy"),
     # Japan uses e-Stat only when an app ID is configured; otherwise metric_series
     # falls back to the FRED series automatically.
@@ -331,6 +335,8 @@ SOURCE_LABEL: dict[tuple[str, str], str] = {
     ("NO", "cpi_yoy"): "SSB (03013)",
     ("GB", "cpi_yoy"): "ONS (D7G7)",
     ("AR", "cpi_yoy"): "INDEC (datos.gob.ar)",
+    ("AR", "policy_rate"): "BCRA 30d deposit (ArgentinaDatos)",
+    ("AR", "unemployment"): "INDEC EPH (datos.gob.ar)",
     ("NZ", "cpi_yoy"): "OECD SDMX",
 }
 if config.ESTAT_APP_ID:  # label JP as e-Stat only when it will actually be used
@@ -379,7 +385,8 @@ def warm_cache(api_key: str) -> None:
             pool.submit(get_release_dates, rid, api_key)
         pool.submit(get_au_cpi_yoy)  # ABS national CPI (Australia)
         nat_names = ["br_selic", "br_ipca_yoy", "br_unemployment", "ca_cpi_yoy",
-                     "no_cpi_yoy", "gb_cpi_yoy", "ar_cpi_yoy", "nz_cpi_yoy"]
+                     "no_cpi_yoy", "gb_cpi_yoy", "ar_cpi_yoy", "ar_policy_rate",
+                     "ar_unemployment", "nz_cpi_yoy"]
         if config.ESTAT_APP_ID:
             nat_names.append("jp_cpi_yoy")
         for nat_name in nat_names:
@@ -664,7 +671,8 @@ def render_footer() -> None:
               <a href="https://www.statcan.gc.ca/">StatCan</a> (CA),
               <a href="https://www.ssb.no/en">SSB</a> (NO),
               <a href="https://www.ons.gov.uk/">ONS</a> (UK),
-              <a href="https://datos.gob.ar/">INDEC</a> (AR),
+              <a href="https://datos.gob.ar/">INDEC</a> &amp;
+              <a href="https://argentinadatos.com/">ArgentinaDatos</a> (AR),
               <a href="https://www.e-stat.go.jp/">e-Stat</a> (JP),
               <a href="https://sdmx.oecd.org/">OECD</a> (NZ).<br>
               Portfolio project for educational purposes — <b>not financial advice</b>.
